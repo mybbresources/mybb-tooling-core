@@ -1,22 +1,31 @@
 <?php
 /**
  * Plugin Name: MyBB Resources Repository
- * Description: Safe catalog browser and package manager for MyBB Admin CP.
+ * Description: Safe catalog browser; requires separately installed MyBB Tooling Core.
  * Version: 0.1.5
  * License: MIT
  */
 if (!defined('IN_MYBB')) { die('Direct initialization of this file is not allowed.'); }
 
+function mybbresources_repository_core_requirement(): string { return '>=0.1.0 <1.0.0'; }
 function mybbresources_repository_info(): array { return ['name'=>'MyBB Resources Repository','description'=>'Browse and manage plugins from plugins.mybbresources.com.','website'=>'https://plugins.mybbresources.com','author'=>'MyBB Resources','authorsite'=>'https://plugins.mybbresources.com','version'=>'0.1.5','compatibility'=>'18*']; }
 function mybbresources_repository_is_installed(): bool { return file_exists(MYBB_ROOT.'inc/plugins/data/mybbresources-repository-installed'); }
 function mybbresources_repository_install(): void {
+    mybbresources_repository_require_core();
     $dir=MYBB_ROOT.'inc/plugins/data'; if(!is_dir($dir))@mkdir($dir,0750,true);
     $deny=$dir.'/.htaccess'; if(!file_exists($deny))file_put_contents($deny,"Require all denied\n");
     $index=$dir.'/index.html';if(!file_exists($index))file_put_contents($index,'');
     file_put_contents($dir.'/mybbresources-repository-installed','0.1.0');
 }
 function mybbresources_repository_uninstall(): void { /* Keep the package ledger; removing the management UI must not orphan its files. */ @unlink(MYBB_ROOT.'inc/plugins/data/mybbresources-repository-installed'); }
-function mybbresources_repository_activate(): void { }
+function mybbresources_repository_require_core(): void {
+    $autoload=MYBB_ROOT.'inc/plugins/mybb-tooling/autoload.php';
+    if(!is_file($autoload))throw new RuntimeException('Install the separate MyBB Tooling Core package first.');
+    require_once $autoload;
+    if(!class_exists('MyBB\\Tooling\\CoreRuntime'))throw new RuntimeException('Update MyBB Tooling Core first.');
+    \MyBB\Tooling\CoreRuntime::assertInstalled(MYBB_ROOT,mybbresources_repository_core_requirement());
+}
+function mybbresources_repository_activate(): void { mybbresources_repository_require_core(); }
 function mybbresources_repository_deactivate(): void { }
 /** Apply MyBB's activate/deactivate callback and cache lifecycle to a verified plugin file. */
 function mybbresources_repository_set_plugin_state(string $siteRoot, string $codename, bool $activate, object $cache, object $plugins): array {

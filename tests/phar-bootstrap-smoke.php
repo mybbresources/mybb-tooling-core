@@ -29,7 +29,7 @@ $run = static function (array $command, ?array $overrides = null): array {
 };
 
 try {
-    $version = '7.6.5';
+    $version = '0.7.5';
     $keyId = 'bootstrap-smoke-key';
     $keypair = sodium_crypto_sign_keypair();
     $secretKey = sodium_crypto_sign_secretkey($keypair);
@@ -63,7 +63,7 @@ try {
 
     $installer = new Phar($outputDirectory.'/mybb-install.phar');
     require_once $root.'/mybb-installer-cli/src/InstallTrust.php';
-    foreach (['bootstrap.json','bootstrap.zip','repository.json','repository.zip','trusted-keys.json'] as $asset) {
+    foreach (['core.json','core.zip','bootstrap.json','bootstrap.zip','repository.json','repository.zip','trusted-keys.json'] as $asset) {
         $entry = 'mybb-installer-cli/dist/'.$asset;
         if (!$installer->offsetExists($entry)) throw new RuntimeException('Installer PHAR is missing embedded asset '.$asset);
         $sourcePath = $bootstrapDirectory.'/'.$asset;
@@ -76,8 +76,8 @@ try {
         if ($embedded !== $trustedKeys) throw new RuntimeException('Installer PHAR does not contain the pinned trust map at '.$path);
     }
     $installerUri = 'phar://'.$outputDirectory.'/mybb-install.phar/';
-    $bootstrapPaths = array_map(static fn(string $name): string => $installerUri.'mybb-installer-cli/dist/'.$name, ['bootstrap.json','bootstrap.zip','repository.json','repository.zip','trusted-keys.json']);
-    if (count(array_filter($bootstrapPaths, 'is_file')) !== 5) throw new RuntimeException('Installer PHAR cannot discover its embedded bundle through the default bootstrap directory.');
+    $bootstrapPaths = array_map(static fn(string $name): string => $installerUri.'mybb-installer-cli/dist/'.$name, ['core.json','core.zip','bootstrap.json','bootstrap.zip','repository.json','repository.zip','trusted-keys.json']);
+    if (count(array_filter($bootstrapPaths, 'is_file')) !== 7) throw new RuntimeException('Installer PHAR cannot discover its embedded bundle through the default bootstrap directory.');
     MyBB\Installer\InstallTrust::assertSeparate($installerUri.'mybb-installer-cli/config/trusted-keys.json', $installerUri.'mybb-installer-cli/dist/trusted-keys.json');
     try {
         MyBB\Installer\InstallTrust::assertSeparate($installerUri.'mybb-installer-cli/config/trusted-keys.json', $installerUri.'mybb-installer-cli/config/trusted-keys.json');
@@ -93,7 +93,7 @@ try {
     file_put_contents($site.'/global.php', '<?php');
     $packageManager = new MyBB\Tooling\PackageManager($site, $site.'/inc/plugins/data/mybb-tooling', $trustedKeys);
     $bootstrapStage = $temporary.'/embedded-bootstrap-stage';
-    foreach ([['bootstrap','mybb-toolchain'],['repository','mybbresources-repository']] as [$prefix,$slug]) {
+    foreach ([['core','mybb-tooling-core'],['bootstrap','mybb-cli'],['repository','mybbresources-repository']] as [$prefix,$slug]) {
         $manifestPath = $installerUri.'mybb-installer-cli/dist/'.$prefix.'.json';
         $packagePath = $installerUri.'mybb-installer-cli/dist/'.$prefix.'.zip';
         $manifest = json_decode(file_get_contents($manifestPath), true, 512, JSON_THROW_ON_ERROR);

@@ -14,3 +14,6 @@ require_once __DIR__.'/src/OfficialMyBBUpgrade.php';
 require_once __DIR__.'/src/CatalogPagination.php';
 require_once __DIR__.'/src/RepositoryMetadataCache.php';
 require_once __DIR__.'/src/TextTable.php';
+require_once __DIR__.'/src/CoreRuntime.php';
+require_once __DIR__.'/src/BootstrapSet.php';
+require_once __DIR__.'/src/CoreMigrationRecovery.php';

@@ -1,16 +1,27 @@
 name: Release portable PHARs
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  source-tag:
+    name: Require an explicit version-tag dispatch
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Reject branch dispatches
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          if [[ ! "$RELEASE_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Dispatch this workflow on a reviewed vMAJOR.MINOR.PATCH tag. Source tags alone do not publish binaries." >&2
+            exit 1
+          fi
   verify:
     name: Full CI for release commit
+    needs: source-tag
     uses: ./.github/workflows/ci.yml
 
   release:

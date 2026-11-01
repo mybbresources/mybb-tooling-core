@@ -6,7 +6,11 @@ check_admin_permissions(['module'=>'config','action'=>'mybbresources_repository'
 $toolingAutoload=MYBB_ROOT.'inc/plugins/mybb-tooling/autoload.php';
 $trustedKeys=MYBB_ROOT.'inc/plugins/mybb-tooling/config/trusted-keys.json';
 $catalog='https://plugins.mybbresources.com/api/v1';
-if(is_file($toolingAutoload))require_once $toolingAutoload;
+if(!is_file($toolingAutoload))error('Install the separate MyBB Tooling Core package first.');
+require_once $toolingAutoload;
+if(!class_exists('MyBB\\Tooling\\CoreRuntime'))error('Update MyBB Tooling Core to a compatible version first.');
+if(!function_exists('mybbresources_repository_require_core'))require_once MYBB_ROOT.'inc/plugins/mybbresources_repository.php';
+try{mybbresources_repository_require_core();}catch(Throwable $dependencyError){error(htmlspecialchars_uni($dependencyError->getMessage()));}
 $repositoryActions=['browse','detail','installed','install','remove','lifecycle'];
 $requestedRepositoryAction=$_POST['repo_action']??$_GET['repo_action']??null;
 if($requestedRepositoryAction===null){$legacyAction=$_POST['action']??$_GET['action']??null;if(is_string($legacyAction)&&in_array($legacyAction,$repositoryActions,true))$requestedRepositoryAction=$legacyAction;}
@@ -65,6 +69,7 @@ if($module==='install'&&($_SERVER['REQUEST_METHOD']??'GET')==='POST') {
         echo '<h2>Review '.($currentVersion!==''?'update of ':'installation of ').mybbresources_escape($slug).'</h2>';
         echo '<p>Current version: '.($currentVersion!==''?mybbresources_escape($currentVersion):'Not installed').' · Target version: '.mybbresources_escape($version).'</p>';
         echo '<p>'.mybbresources_escape((string)($release['changelog']??'')).'</p><p>Compatibility: Compatible · MyBB '.mybbresources_escape($siteMybbVersion).' (requires '.mybbresources_escape((string)($manifest['requirements']['mybb']??'')).') · PHP '.mybbresources_escape($sitePhpVersion).' (requires '.mybbresources_escape((string)($manifest['requirements']['php']??'')).')</p>';
+        foreach(($manifest['requirements']['packages']??[]) as $dependency=>$range)echo '<p>Required package: '.mybbresources_escape($dependency).' '.mybbresources_escape($range).' · Installed: '.mybbresources_escape($ledger[$dependency]['version']??'unavailable').'</p>';
         if(!empty($impact['conflicts'])){echo '<h3>Locally modified or unmanaged conflicts</h3><ul>';foreach($impact['conflicts'] as $path)echo '<li>'.mybbresources_escape($path).'</li>';echo '</ul><p>These files will not be replaced unless you explicitly choose and review a forced replacement.</p>';}
         echo '<h3>Files to install or replace</h3><ul>';foreach($impact['files'] as $file){$path=$file['destination'];$conflict=in_array($path,$impact['conflicts']??[],true);$prior=$ledger[$slug]['files'][$path]['sha256']??null;$modified=$file['existing_sha256']!==null&&(!is_string($prior)||!hash_equals($prior,$file['existing_sha256']));$description=$conflict?' (modified or unmanaged conflict; protected)':($modified?' (locally modified; explicit forced replacement selected)':($file['existing_sha256']?' (replace the previously managed file)':' (new)'));echo '<li>'.mybbresources_escape($path).$description.'</li>'; }echo '</ul>';
         if(!empty($impact['obsolete_files_to_remove'])){echo '<h3>Obsolete unchanged files to remove</h3><ul>';foreach($impact['obsolete_files_to_remove'] as $path)echo '<li>'.mybbresources_escape($path).'</li>';echo '</ul>';}

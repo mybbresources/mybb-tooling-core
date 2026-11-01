@@ -21,7 +21,7 @@ final class Manifest
             if (!array_key_exists($key, $m)) throw new RuntimeException("Manifest missing required field: {$key}");
         }
         foreach (['source','requirements','package','files','uninstall'] as $key) if (!is_array($m[$key])) throw new RuntimeException("Manifest {$key} must be an object or array");
-        if ($m['schema_version'] !== 1) throw new RuntimeException('Unsupported manifest schema version');
+        if (!in_array($m['schema_version'], [1,2], true)) throw new RuntimeException('Unsupported manifest schema version');
         foreach (['slug','name','version','description','license'] as $key) if (!is_string($m[$key]) || trim($m[$key])==='') throw new RuntimeException("Manifest {$key} must be a non-empty string");
         if (!preg_match('/^[a-z0-9][a-z0-9-]{1,62}$/', $m['slug'])) throw new RuntimeException('Invalid plugin slug');
         if (!preg_match('/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/', $m['version'])) throw new RuntimeException('Invalid semantic version');
@@ -36,6 +36,14 @@ final class Manifest
             if (!filter_var($m['source']['rights_evidence_url'],FILTER_VALIDATE_URL) || parse_url($m['source']['rights_evidence_url'],PHP_URL_SCHEME)!=='https') throw new RuntimeException('Upstream rights evidence must use HTTPS');
         }
         foreach (['mybb','php'] as $requirement) { if (!isset($m['requirements'][$requirement]) || !is_string($m['requirements'][$requirement])) throw new RuntimeException("Missing {$requirement} compatibility range"); Compatibility::validateRange($m['requirements'][$requirement]); }
+        $dependencies=$m['requirements']['packages']??[];
+        if ($m['schema_version']===1 && array_key_exists('packages',$m['requirements'])) throw new RuntimeException('Package dependencies require manifest schema v2');
+        if ($m['schema_version']===2 && !array_key_exists('packages',$m['requirements'])) throw new RuntimeException('Manifest v2 requires package dependencies');
+        if (!is_array($dependencies) || count($dependencies)>64) throw new RuntimeException('Invalid package dependencies');
+        foreach ($dependencies as $slug=>$range) {
+            if (!is_string($slug)||!preg_match('/^[a-z0-9][a-z0-9-]{1,62}$/D',$slug)||$slug===$m['slug']||!is_string($range)) throw new RuntimeException('Invalid or self-referencing package dependency');
+            Compatibility::validateRange($range);
+        }
         foreach (['url','sha256','size','signature','key_id'] as $key) if (!array_key_exists($key, $m['package'])) throw new RuntimeException("Package missing {$key}");
         if (!is_string($m['package']['url']) || !is_string($m['package']['sha256']) || !is_string($m['package']['signature']) || !is_string($m['package']['key_id']) || trim($m['package']['key_id'])==='') throw new RuntimeException('Package URL, digest, signature, and key ID must be strings');
         if (!filter_var($m['package']['url'],FILTER_VALIDATE_URL)||parse_url($m['package']['url'],PHP_URL_SCHEME)!=='https') throw new RuntimeException('Package URL must use HTTPS');
@@ -44,12 +52,13 @@ final class Manifest
         $sources = $destinations = [];
         foreach ($m['files'] as $file) {
             if (!is_array($file) || !isset($file['source'],$file['destination'],$file['role']) || !is_string($file['source']) || !is_string($file['destination']) || !is_string($file['role'])) throw new RuntimeException('Invalid file manifest entry');
-            self::validateRelativePath($file['source']); self::validateRelativePath($file['destination']);
+            self::validateRelativePath($file['source']); self::validateRelativePath($file['destination']);CoreRuntime::assertDestinationOwner($m['slug'],$file['destination']);
             if (!in_array($file['role'], self::ROLES, true)) throw new RuntimeException('Invalid file role');
             $sourceKey=strtolower($file['source']);$destinationKey=strtolower($file['destination']);
             if (isset($sources[$sourceKey]) || isset($destinations[$destinationKey])) throw new RuntimeException('Duplicate normalized source or destination path');
             $sources[$sourceKey] = $destinations[$destinationKey] = true;
         }
+        CoreRuntime::validateManifest($m);
         if (($m['uninstall']['preserve_user_data'] ?? false) !== true) throw new RuntimeException('v1 requires preserve_user_data=true');
         if (($m['uninstall']['remove_owned_files'] ?? false) !== true) throw new RuntimeException('v1 requires remove_owned_files=true for ledger-owned paths');
     }

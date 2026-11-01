@@ -29,7 +29,7 @@ The draft in `../PLUGIN-MANIFEST.md` is refined as follows. JSON is UTF-8; unkno
 - **SH-008** Checksums protect integrity; signature trust establishes catalog authorization. Both checks are required.
 - **SH-009** Before removing a package that owns plugin-role files, each client must establish that those plugins are inactive using MyBB's authoritative activation cache. A positively active plugin or unavailable activation state blocks removal; deactivation is a separate explicit action. The local ownership ledger's active flag is an additional refusal signal, not a substitute for checking MyBB.
 
-The installed trust ring lives at `inc/plugins/mybb-tooling/config/trusted-keys.json` and is owned only by the `mybb-toolchain` package. Plugin packages must not carry or overwrite that path. For routine key rotation, publish a toolchain release signed by a key already trusted by the site and include both the outgoing and incoming public keys; after that ring is installed, subsequent packages may be signed by the incoming key. Emergency recovery from a compromised signer still requires an out-of-band trusted pin/update and is a release-operations responsibility.
+The installed trust ring lives at `inc/plugins/mybb-tooling/config/trusted-keys.json` and is owned only by the `mybb-tooling-core` package. Plugin packages must not carry or overwrite that path. For routine key rotation, publish a core release signed by a key already trusted by the site and include both the outgoing and incoming public keys; after that ring is installed, subsequent packages may be signed by the incoming key. Emergency recovery from a compromised signer still requires an out-of-band trusted pin/update and is a release-operations responsibility.
 
 ## 4. API conventions
 
@@ -53,3 +53,15 @@ The installed trust ring lives at `inc/plugins/mybb-tooling/config/trusted-keys.
 ## 6. Security, privacy, operations
 
 Never log secrets, credentials, raw private keys, database passwords, or package contents. Audit publish/revoke/key rotation and destructive file actions. Catalog downloads are rate-limited and served with immutable cache headers. Retain install ledgers and rollback artifacts only as long as needed by the site's stated backup policy. All errors must be actionable and accessible in CLI/Admin CP.
+
+## Separate core dependency (manifest schema v2)
+
+Ordinary plugins may continue to use schema v1 without package dependencies. A package declaring dependencies must use schema v2 and provide `requirements.packages`, an object mapping package slugs to the shared version comparator ranges. Schema v1 rejects that field; older clients reject schema v2. Dependencies must already be installed, compatible, and unchanged. Cycles, incompatible updates of a required package, and removal of a package with installed dependents are rejected before file changes, including forced operations.
+
+The reserved packages use schema v2. `mybb-tooling-core` owns only `inc/plugins/mybb-tooling/` and the MyBB descriptor `inc/plugins/mybb_tooling_core.php`; it has no package dependencies. `mybb-cli` owns only `inc/plugins/data/mybb-tooling/bin/mybb`. `mybbresources-repository` owns its plugin and Admin CP module. Both clients declare `mybb-tooling-core >=0.1.0 <1.0.0` and check installed core ownership, version, and file integrity. Core availability depends on installation, not an activation flag: the library has no activation-time runtime hooks. Removing core requires removal of dependent clients first.
+
+Standalone Composer projects resolve the public core library through VCS with a version constraint and lockfile. Tracked copies under `packages/` are removed. Local coordinated CI can use a temporary path repository directly referencing canonical source. Portable installer and CLI PHARs remain self-contained so they can bootstrap or recover a site before core exists.
+
+Existing `mybb-toolchain` installations require explicit `mybb plugin install core.json core.zip --migrate-toolchain --path=SITE`, reviewed then confirmed with `--yes`. Use a new standalone CLI or PHAR for this transition. Migration refuses force, mixed ownership, missing files, or modified legacy files. It transfers the CLI ownership record, replaces the core files, and records provenance while preserving the CLI executable until its separate update. Existing repository ownership gains the core requirement. Failure restores the original combined ledger and files.
+
+An interrupted transition leaves a private `transactions/TRANSACTION/core-migration.json` journal. Use the standalone CLI/PHAR: `mybb core recover-migration --path=SITE --journal=PATH --dry-run`, then `--yes`. Recovery preflights the entire recorded file set, refuses changed ledgers and symlinks, preserves operator edits, and refuses committed migrations. Recovery cannot replay arbitrary package scripts. Keep the journal and backups until the transition is verified.

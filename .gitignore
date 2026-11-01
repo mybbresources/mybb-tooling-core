@@ -9,3 +9,7 @@
 *.pem
 *.sql
 *.sqlite
+
+**/composer.local.*
+/mybb-cli/composer.lock
+/mybb-installer-cli/composer.lock

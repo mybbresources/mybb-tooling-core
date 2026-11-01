@@ -44,7 +44,7 @@ try {
         if ($filename === 'mybb-install.phar') {
             $phar = new Phar($path);
             if (!$phar->offsetExists('mybb-installer-cli/src/InstallPlanOutput.php') || !$phar->offsetExists('mybb-installer-cli/src/InstallRecovery.php') || !$phar->offsetExists('mybb-installer-cli/src/InstallTrust.php')) throw new RuntimeException('Installer PHAR omits required plan, recovery, or trust validation code.');
-            $bootstrapNames = ['bootstrap.json','bootstrap.zip','repository.json','repository.zip','trusted-keys.json'];
+            $bootstrapNames = ['core.json','core.zip','bootstrap.json','bootstrap.zip','repository.json','repository.zip','trusted-keys.json'];
             $embeddedCount = 0;
             foreach ($bootstrapNames as $asset) if ($phar->offsetExists('mybb-installer-cli/dist/'.$asset)) $embeddedCount++;
             if ($embeddedCount !== 0) {
@@ -53,7 +53,7 @@ try {
                 $keys = json_decode($phar[$trustPath]->getContent(), true, 512, JSON_THROW_ON_ERROR);
                 $bundleKeys = json_decode($phar['mybb-installer-cli/dist/trusted-keys.json']->getContent(), true, 512, JSON_THROW_ON_ERROR);
                 if (!is_array($keys) || !$keys || $keys !== $bundleKeys) throw new RuntimeException('Installer PHAR bootstrap keys do not match a nonempty pinned trust map.');
-                foreach ([['bootstrap','mybb-toolchain'],['repository','mybbresources-repository']] as [$prefix,$slug]) {
+                foreach ([['core','mybb-tooling-core'],['bootstrap','mybb-cli'],['repository','mybbresources-repository']] as [$prefix,$slug]) {
                     $manifestPath = 'mybb-installer-cli/dist/'.$prefix.'.json';
                     $archivePath = 'mybb-installer-cli/dist/'.$prefix.'.zip';
                     $manifest = MyBB\Tooling\Manifest::decode($phar[$manifestPath]->getContent());
