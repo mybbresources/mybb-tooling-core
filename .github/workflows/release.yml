@@ -1,0 +1,95 @@
+name: Release portable PHARs
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Full CI for release commit
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Build and attest portable PHARs
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: phar, sodium, zip
+          coverage: none
+
+      - name: Validate release tag
+        id: version
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]; then
+            echo "Tag must be vMAJOR.MINOR.PATCH with an optional prerelease/build suffix." >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed companion bundles for the installer PHAR
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+          SIGNING_KEY_ID: ${{ vars.MYBB_TOOLING_KEY_ID }}
+          SIGNING_SECRET_KEY: ${{ secrets.MYBB_TOOLING_SIGNING_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SIGNING_KEY_ID" || -z "$SIGNING_SECRET_KEY" ]]; then
+            echo "Configure MYBB_TOOLING_KEY_ID and MYBB_TOOLING_SIGNING_SECRET_KEY before publishing installer releases." >&2
+            exit 1
+          fi
+          php -r '$keys=json_decode(file_get_contents($argv[1]), true, 512, JSON_THROW_ON_ERROR); if (!is_array($keys) || !$keys || !isset($keys[$argv[2]])) { fwrite(STDERR, "The committed installer trust map must pin the release signing key.\n"); exit(1); }' mybb-installer-cli/config/trusted-keys.json "$SIGNING_KEY_ID"
+          bundle_dir="$RUNNER_TEMP/mybb-installer-bootstrap"
+          secret_file="$RUNNER_TEMP/mybb-tooling-signing-key"
+          trap 'rm -f "$secret_file"' EXIT
+          install -d -m 700 "$bundle_dir"
+          umask 077
+          printf '%s\n' "$SIGNING_SECRET_KEY" > "$secret_file"
+          php tools/build-bootstrap.php "$RELEASE_VERSION" "$SIGNING_KEY_ID" "$secret_file" mybb-installer-cli/config/trusted-keys.json "$bundle_dir"
+          rm -f "$secret_file"
+          echo "MYBB_PHAR_BOOTSTRAP_DIR=$bundle_dir" >> "$GITHUB_ENV"
+          echo "MYBB_PHAR_TRUSTED_KEYS_FILE=$GITHUB_WORKSPACE/mybb-installer-cli/config/trusted-keys.json" >> "$GITHUB_ENV"
+
+      - name: Build PHAR artifacts
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: php -d phar.readonly=0 tools/build-phars.php "$RELEASE_VERSION" dist
+
+      - name: Smoke-test release PHAR artifacts
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: php tests/phar-smoke.php "$RELEASE_VERSION" dist
+
+      - name: Generate build provenance attestations
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/mybb-cli.phar
+            dist/mybb-cli.phar.sha256
+            dist/mybb-install.phar
+            dist/mybb-install.phar.sha256
+
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/mybb-cli.phar dist/mybb-cli.phar.sha256 dist/mybb-install.phar dist/mybb-install.phar.sha256 --verify-tag --generate-notes

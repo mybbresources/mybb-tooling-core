@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "slug": "sample-admin-panel",
+  "name": "Synthetic Admin Panel",
+  "version": "0.1.0",
+  "description": "A sample package demonstrating an Admin CP module destination.",
+  "authors": ["MyBB Tooling Test Fixtures"],
+  "license": "MIT",
+  "source": { "type": "original" },
+  "requirements": { "mybb": ">=1.8.41 <1.9.0", "php": ">=8.2" },
+  "package": { "url": "https://plugins.mybbresources.com/api/v1/plugins/sample-admin-panel/releases/0.1.0/package", "sha256": "", "size": 0, "signature": "", "key_id": "" },
+  "files": [
+    { "source": "upload/inc/plugins/sample_admin_panel.php", "destination": "inc/plugins/sample_admin_panel.php", "role": "plugin" },
+    { "source": "upload/admin/modules/config/sample_admin_panel.php", "destination": "admin/modules/config/sample_admin_panel.php", "role": "admin" }
+  ],
+  "uninstall": { "remove_owned_files": true, "preserve_user_data": true }
+}

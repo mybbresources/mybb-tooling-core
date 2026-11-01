@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "slug": "sample-hello-world",
+  "name": "Synthetic Hello World",
+  "version": "0.1.0",
+  "description": "A harmless sample MyBB plugin used to exercise package mapping.",
+  "authors": ["MyBB Tooling Test Fixtures"],
+  "license": "MIT",
+  "source": { "type": "original" },
+  "requirements": { "mybb": ">=1.8.41 <1.9.0", "php": ">=8.2" },
+  "package": { "url": "https://plugins.mybbresources.com/api/v1/plugins/sample-hello-world/releases/0.1.0/package", "sha256": "", "size": 0, "signature": "", "key_id": "" },
+  "files": [
+    { "source": "upload/inc/plugins/sample_hello_world.php", "destination": "inc/plugins/sample_hello_world.php", "role": "plugin" }
+  ],
+  "uninstall": { "remove_owned_files": true, "preserve_user_data": true }
+}

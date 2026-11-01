@@ -1,0 +1,145 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+$loaded=false;for($dir=__DIR__;$dir!==dirname($dir);$dir=dirname($dir)){$siteAutoload=$dir.'/inc/plugins/mybb-tooling/autoload.php';if(is_file($siteAutoload)){require $siteAutoload;$loaded=true;break;}}if(!$loaded)for($dir=__DIR__;$dir!==dirname($dir);$dir=dirname($dir))if(is_file($dir.'/vendor/autoload.php')){require $dir.'/vendor/autoload.php';$loaded=true;break;}if(!$loaded){$fallback=dirname(__DIR__,2).'/autoload.php';if(!is_file($fallback)){fwrite(STDERR,"Shared tooling package is missing; install this project with Composer.\n");exit(1);}require $fallback;}
+use MyBB\Tooling\PackageManager;
+use MyBB\Tooling\CatalogClient;
+use MyBB\Tooling\CatalogException;
+use MyBB\Tooling\DatabaseTools;
+use MyBB\Tooling\PluginInventory;
+
+const EXIT_OK=0, EXIT_USAGE=2, EXIT_ERROR=1, EXIT_RETRYABLE=3;
+function out(array $data,bool $json): void { echo $json?json_encode($data,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)."\n":MyBB\Tooling\TextTable::render($data); }
+function safeCliMessage(string $message):string{$clean=preg_replace('/[\x00-\x1f\x7f-\x9f]/u',' ',trim($message))??'Operation failed.';return substr($clean,0,500);}
+function stableOperationError(Throwable $e):string{$message=strtolower($e->getMessage());if(str_starts_with($message,'incompatible '))return 'incompatible_release';if(str_contains($message,'signing key has been revoked'))return 'signing_key_revoked';if(str_contains($message,'signing key is not trusted'))return 'untrusted_signing_key';if(str_contains($message,'manifest signature is invalid'))return 'invalid_signature';if(str_contains($message,'package size or sha-256'))return 'package_integrity_failure';if(str_contains($message,'unsupported manifest schema'))return 'unsupported_manifest_schema';return 'operation_failed';}
+function siteRoot(?string $path,?string $configPath=null): string {
+    if($path!==null&&$configPath!==null)throw new InvalidArgumentException('Use either --path=SITE or --config=SITE/inc/config.php, not both.');
+    if($configPath!==null){
+        if(is_link($configPath))throw new RuntimeException('MyBB config path cannot be a symlink.');
+        $configReal=realpath($configPath);
+        if($configReal===false||!is_file($configReal)||basename($configReal)!=='config.php'||basename(dirname($configReal))!=='inc')throw new RuntimeException('--config must point to a regular SITE/inc/config.php file.');
+        $path=dirname(dirname($configReal));
+    }
+    if($path===null){for($p=__DIR__;$p!==dirname($p);$p=dirname($p))if(is_file($p.'/inc/config.php')&&is_file($p.'/global.php')){$path=$p;break;}$path??=getcwd();}
+    $real=realpath($path);if(!$real)throw new RuntimeException('Site path does not exist');$found=[];for($p=$real;$p!==dirname($p);$p=dirname($p))if(is_file($p.'/inc/config.php')&&is_file($p.'/global.php'))$found[]=$p;
+    if(count($found)!==1)throw new RuntimeException(count($found)?'Multiple MyBB roots found; supply --path or --config':'No MyBB root found; use --path or --config');return $found[0];
+}
+function pluginIdentity(string $root,string $state,string $identifier): array {
+    if(!preg_match('/^[a-zA-Z0-9_-]{1,63}$/',$identifier))throw new InvalidArgumentException('Plugin identifier must be a managed slug or plugin codename.');
+    $ledgerPath=$state.'/installed.json';$ledger=is_file($ledgerPath)?json_decode((string)file_get_contents($ledgerPath),true,512,JSON_THROW_ON_ERROR):[];if(!is_array($ledger))throw new RuntimeException('Invalid installed plugin ledger.');
+    $managed=$ledger[$identifier]??null;
+    if(is_array($managed))foreach(($managed['files']??[]) as $path=>$record)if(($record['role']??'')==='plugin'&&preg_match('#^inc/plugins/([A-Za-z0-9_]+)\.php$#',$path,$match)){
+        $file=$root.'/'.$path;if(is_link($file)||!is_file($file))throw new RuntimeException('Managed plugin file is missing or unsafe: '.$path);
+        if(!is_string($record['sha256']??null)||!hash_equals($record['sha256'],hash_file('sha256',$file)))throw new RuntimeException('Managed plugin file was modified; refusing to execute it: '.$path);
+        return ['slug'=>$identifier,'codename'=>$match[1],'managed'=>true];
+    }
+    $codename=$identifier;$path='inc/plugins/'.$codename.'.php';$file=$root.'/'.$path;if(is_link($file)||!is_file($file))throw new RuntimeException('Plugin file is missing or unsafe: '.$path);
+    return ['slug'=>null,'codename'=>$codename,'managed'=>false];
+}
+function assertManagedPluginInactiveForRemoval(string $root,string $state,string $slug): void {
+    // MyBB's bootstrap normally runs at script scope. This confirmed destructive
+    // path loads it from a helper, so bind its runtime symbols before including it.
+    global $cache,$db,$mybb,$plugins,$lang,$settings,$theme,$templates,$session,$user,$parser,$header;
+    $ledgerPath=$state.'/installed.json';$ledger=is_file($ledgerPath)?json_decode((string)file_get_contents($ledgerPath),true,512,JSON_THROW_ON_ERROR):[];
+    if(!is_array($ledger)||!is_array($ledger[$slug]??null))throw new RuntimeException('Invalid installed plugin ledger.');
+    $record=$ledger[$slug];$codenames=[];
+    foreach(($record['files']??[]) as $path=>$file)if(is_array($file)&&($file['role']??'')==='plugin'&&preg_match('#^inc/plugins/([A-Za-z0-9_]+)\.php$#',(string)$path,$match))$codenames[]=$match[1];
+    if(!$codenames)return;
+    $originalDirectory=getcwd();
+    try{
+        if(!chdir($root))throw new RuntimeException('Cannot enter MyBB site before checking plugin activation.');
+        if(!defined('IN_MYBB'))define('IN_MYBB',1);
+        if(!defined('THIS_SCRIPT'))define('THIS_SCRIPT','mybb-cli');
+        ob_start();
+        try{require_once $root.'/global.php';$runtimeOutput=(string)ob_get_contents();}finally{ob_end_clean();}
+        if(trim($runtimeOutput)!=='')throw new RuntimeException('MyBB runtime emitted output; uninstall was not applied.');
+        if(!isset($cache)||!is_object($cache)||!method_exists($cache,'read'))throw new RuntimeException('MyBB activation state could not be checked; run plugin deactivate '.$slug.' --yes and retry.');
+        \MyBB\Tooling\PluginLifecycle::assertInactive($record,$cache,'run plugin deactivate '.$slug.' --yes before uninstalling.');
+    }finally{if(is_string($originalDirectory))@chdir($originalDirectory);}
+}
+function protectedPassword(string $path,string $siteRoot): string {
+    if($path===''||is_link($path))throw new RuntimeException('Password file must be a regular, non-symlink file.');$resolved=realpath($path);$root=realpath($siteRoot);if($resolved===false||$root===false||!is_file($resolved))throw new RuntimeException('Password file must be a readable regular file.');if(str_starts_with($resolved,rtrim($root,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR))throw new RuntimeException('Password file must be stored outside the public MyBB site directory.');$before=@lstat($path);if(!is_array($before)||($before['mode']&0170000)!==0100000)throw new RuntimeException('Password file must be a regular file, not a symlink or special file.');$stream=@fopen($resolved,'rb');if($stream===false)throw new RuntimeException('Cannot read protected password file.');try{$opened=fstat($stream);if(!is_array($opened)||$opened['dev']!==$before['dev']||$opened['ino']!==$before['ino'])throw new RuntimeException('Password file changed while opening it.');if(($opened['mode']&0077)!==0||($opened['mode']&0400)===0)throw new RuntimeException('Password file permissions are too broad; use chmod 600.');$password=stream_get_contents($stream,4097);if(!is_string($password)||strlen($password)>4096)throw new RuntimeException('Password file is empty or exceeds the 4096-byte limit.');}finally{fclose($stream);}if(str_ends_with($password,"\r\n"))$password=substr($password,0,-2);elseif(str_ends_with($password,"\n"))$password=substr($password,0,-1);if($password===''||preg_match('/[\x00-\x1f\x7f]/',$password))throw new RuntimeException('Password file must contain one non-empty password line.');return $password;
+}
+function resetMyBBPassword(string $root,int $uid,string $password): array {
+    $originalDirectory=getcwd();
+    try {
+        if(!chdir($root))throw new RuntimeException('Cannot change to the MyBB site directory.');
+        if(!defined('IN_MYBB'))define('IN_MYBB',1);
+        if(!defined('THIS_SCRIPT'))define('THIS_SCRIPT','mybb-cli');
+        ob_start();
+        try{require_once $root.'/global.php';$runtimeOutput=(string)ob_get_contents();}finally{ob_end_clean();}
+        if(trim($runtimeOutput)!=='')throw new RuntimeException('MyBB runtime emitted output; password was not changed.');
+        if(!is_file($root.'/inc/functions_user.php')||!is_file($root.'/inc/datahandlers/user.php'))throw new RuntimeException('MyBB user-management APIs are unavailable.');
+        require_once $root.'/inc/functions_user.php';require_once $root.'/inc/datahandlers/user.php';
+        if(!function_exists('get_user')||!class_exists('UserDataHandler'))throw new RuntimeException('MyBB user-management APIs did not initialize.');
+        $user=get_user($uid);if(!is_array($user)||empty($user['uid']))throw new RuntimeException('No MyBB user exists with the requested ID.');
+        $handler=new UserDataHandler('update');$handler->set_data(['uid'=>$uid,'username'=>(string)($user['username']??''),'email'=>(string)($user['email']??''),'password'=>$password,'password2'=>$password]);
+        ob_start();try{$valid=$handler->validate_user();$validationOutput=(string)ob_get_contents();}finally{ob_end_clean();}
+        if(trim($validationOutput)!=='')throw new RuntimeException('MyBB password validation emitted output; password was not changed.');
+        if(!$valid)throw new RuntimeException('MyBB rejected the password under this forum’s configured password policy.');
+        global $db,$plugins;if(!isset($db)||!is_object($db)||!method_exists($db,'delete_query'))throw new RuntimeException('MyBB database session service is unavailable.');
+        ob_start();try{$saved=$handler->update_user();$db->delete_query('sessions',"uid='".$uid."'");if(isset($plugins)&&is_object($plugins)&&method_exists($plugins,'run_hooks'))$plugins->run_hooks('password_changed');$hookOutput=(string)ob_get_contents();}finally{ob_end_clean();}
+        if(!$saved)throw new RuntimeException('MyBB did not save the password update.');
+        return ['status'=>'password_reset','uid'=>$uid,'username'=>(string)$user['username'],'active_sessions_revoked'=>true,'password_value_returned'=>false,'plugin_output_suppressed'=>trim($hookOutput)!==''];
+    } finally {if(is_string($originalDirectory))@chdir($originalDirectory);}
+}
+function args(array $argv): array { $o=['json'=>false,'dry'=>false,'force'=>false,'yes'=>false];$p=[];foreach(array_slice($argv,1) as $a){if($a==='--json'||$a==='--format=json')$o['json']=true;elseif($a==='--format=table')$o['json']=false;elseif($a==='--dry-run')$o['dry']=true;elseif($a==='--force')$o['force']=true;elseif($a==='--yes')$o['yes']=true;elseif(str_starts_with($a,'--path='))$o['path']=substr($a,7);elseif(str_starts_with($a,'--config='))$o['config']=substr($a,9);elseif(str_starts_with($a,'--catalog='))$o['catalog']=rtrim(substr($a,10),'/');elseif(str_starts_with($a,'--output='))$o['output']=substr($a,9);elseif(str_starts_with($a,'--password-file='))$o['password_file']=substr($a,16);elseif(str_starts_with($a,'--'))throw new InvalidArgumentException('Unknown option '.$a);else $p[]=$a;}return [$p,$o]; }
+try {
+    if(in_array('--help',$argv,true)||in_array('-h',$argv,true)){fwrite(STDOUT,"Usage: mybb COMMAND [ARGS] [--path=SITE|--config=SITE/inc/config.php] [--format=table|json]\nCommands: core status|check, plugin list|search|info|install|update|remove|activate|deactivate, user password-reset UID --password-file=PATH --yes, cache clear, config validate, db check, db backup --output=PATH [--dry-run]\n");exit(0);}[$p,$o]=args($argv); $cmd=array_shift($p)??'help';if($cmd==='help'){fwrite(STDOUT,"Usage: mybb COMMAND [ARGS] [--path=SITE|--config=SITE/inc/config.php] [--format=table|json]\nCommands: core status|check, plugin list|search|info|install|update|remove|activate|deactivate, user password-reset UID --password-file=PATH --yes, cache clear, config validate, db check, db backup --output=PATH [--dry-run]\n");exit(0);} $root=siteRoot($o['path']??null,$o['config']??null); $state=$root.'/inc/plugins/data/mybb-tooling'; $keyFile=$root.'/inc/plugins/mybb-tooling/config/trusted-keys.json';if(!is_file($keyFile))$keyFile=dirname(__DIR__).'/config/trusted-keys.json';$keys=json_decode((string)@file_get_contents($keyFile),true)?:[];
+    $pm=new PackageManager($root,$state,$keys);
+    if($cmd==='core'&&($p[0]??'')==='status') $result=['status'=>'ok','site_root'=>$root,'mybb_version'=>MyBB\Tooling\Compatibility::detectMybbVersion($root),'php'=>PHP_VERSION,'ledger'=>$state.'/installed.json'];
+    elseif($cmd==='core'&&($p[0]??'')==='check') $result=['site_root'=>$root,'php'=>PHP_VERSION,'config_readable'=>is_readable($root.'/inc/config.php'),'plugins_dir_writable'=>is_writable($root.'/inc/plugins'),'zip'=>extension_loaded('zip'),'sodium'=>extension_loaded('sodium')];
+    elseif($cmd==='plugin'&&($p[0]??'')==='list') { $ledger=is_file($state.'/installed.json')?json_decode((string)file_get_contents($state.'/installed.json'),true,512,JSON_THROW_ON_ERROR):[]; if(!is_array($ledger))throw new RuntimeException('Invalid installed plugin ledger'); $result=\MyBB\Tooling\PluginInventory::inspect($root,$ledger); }
+    elseif($cmd==='plugin'&&in_array($p[0]??'', ['search','info'],true)){$catalog=new CatalogClient($o['catalog']??'https://plugins.mybbresources.com');$result=($p[0]==='search')?$catalog->list($p[1]??''):$catalog->plugin($p[1]??throw new InvalidArgumentException('Usage: plugin info SLUG'));}
+    elseif($cmd==='plugin'&&in_array($p[0]??'', ['install','update'],true)) {
+        if(count($p)<2) throw new InvalidArgumentException('Usage: plugin install SLUG [VERSION] or plugin install MANIFEST.json PACKAGE.zip');
+        $operation=$p[0];$temporaryZip=null;$sourceDescription='';
+        if(is_file($p[1])&&isset($p[2])&&is_file($p[2])){$manifestPath=$p[1];$zip=$p[2];$manifest=json_decode((string)file_get_contents($manifestPath),true,512,JSON_THROW_ON_ERROR);$sourceDescription='local manifest '.$manifestPath;$confirmationArgs=['mybb','plugin',$operation,$manifestPath,$zip];}
+        else {$catalog=new CatalogClient($o['catalog']??'https://plugins.mybbresources.com');$slug=$p[1];$details=$catalog->plugin($slug);$releases=$details['releases']??[];if(!$releases)throw new RuntimeException('Plugin has no published compatible releases');$wanted=$p[2]??null;$release=null;foreach($releases as $candidate)if(!$wanted||($candidate['version']??'')===$wanted){$release=$candidate;break;}if(!$release)throw new RuntimeException('Requested published version was not found');$manifest=$release['manifest']??throw new RuntimeException('Catalog release has no manifest');$temporaryZip=$catalog->download($manifest);$zip=$temporaryZip;$sourceDescription='catalog release '.$slug.' '.($manifest['version']??'');$confirmationArgs=['mybb','plugin',$operation,$slug,(string)$manifest['version']];}
+        try {
+            $plan=$pm->install($zip,$manifest,$o['force'],true);
+            if($o['dry']){$result=$plan;}
+            elseif(!$o['yes']) {
+                $conflicts=$plan['conflicts']??[];
+                $overwrite=array_values(array_map(static fn(array $file):string=>$file['destination'],array_filter($plan['files']??[],static fn(array $file):bool=>($file['existing_sha256']??null)!==null)));
+                $nextArgs=$confirmationArgs; $nextArgs[]='--path='.$root; if(isset($o['catalog']))$nextArgs[]='--catalog='.$o['catalog']; if($o['force']||$conflicts)$nextArgs[]='--force'; if($o['json'])$nextArgs[]='--json'; $nextArgs[]='--yes';
+                $result=['status'=>$conflicts&&!$o['force']?'conflicts':'confirmation_required','confirmation_required'=>true,'operation'=>$operation,'source'=>$sourceDescription,'slug'=>$plan['slug']??$manifest['slug'],'version'=>$plan['version']??$manifest['version'],'plan'=>$plan,'existing_files_to_replace'=>$overwrite,'next_step'=>$conflicts&&!$o['force']?'Review the conflict list; next_arguments explicitly select force and confirmation.':'Review the plan and run next_arguments to apply this exact release.','next_arguments'=>$nextArgs];
+            }
+            elseif(($plan['conflicts']??[])&&!$o['force']) throw new RuntimeException('Modified destination files conflict with this release; review them with --dry-run, then use --force --yes only if you intend to replace those files.');
+            else $result=$pm->install($zip,$manifest,$o['force'],false);
+        } finally {if($temporaryZip!==null)@unlink($temporaryZip);}
+    }
+    elseif($cmd==='plugin'&&($p[0]??'')==='remove') { if(empty($p[1])) throw new InvalidArgumentException('Usage: plugin remove SLUG [--yes]'); $plan=$pm->remove($p[1],$o['force'],true); if($o['dry']||!$o['yes'])$result=['status'=>$o['dry']?'dry_run':'confirmation_required','confirmation_required'=>true,'files_to_remove'=>$plan['removed'],'modified_files_to_preserve'=>$plan['preserved'],'missing_files'=>$plan['missing'],'plugin_data'=>'preserved','activation_check'=>'MyBB runtime activation will be checked again before confirmed removal','next_command'=>'mybb plugin remove '.$p[1].' --yes']; else {assertManagedPluginInactiveForRemoval($root,$state,$p[1]);$result=$pm->remove($p[1],$o['force'],false);} }
+    elseif($cmd==='plugin'&&in_array($p[0]??'', ['activate','deactivate'],true)) {
+        if(empty($p[1])||isset($p[2]))throw new InvalidArgumentException('Usage: mybb plugin activate|deactivate SLUG_OR_CODENAME [--dry-run|--yes]');
+        $identity=pluginIdentity($root,$state,$p[1]);$wantActive=$p[0]==='activate';$inventory=PluginInventory::inspect($root,is_file($state.'/installed.json')?(json_decode((string)file_get_contents($state.'/installed.json'),true,512,JSON_THROW_ON_ERROR)?:[]):[]);$current=null;
+        foreach($inventory['plugins'] as $entry)if(($identity['managed']&&$entry['slug']===$identity['slug'])||(!$identity['managed']&&$entry['file']===$identity['codename'].'.php')){$current=$entry['active'];break;}
+        $activationCacheMissing=PluginInventory::activationCacheIsMissing($root);
+        if($current===null&&!$activationCacheMissing)throw new RuntimeException('Plugin activation state is unavailable because cache/plugins.php is not safely readable.');
+        // cache/plugins.php is not MyBB's canonical activation store on default
+        // installations (the datacache is database-backed). Never use this
+        // optional literal snapshot to skip a lifecycle operation. The runtime
+        // below reads and updates MyBB's authoritative cache.
+        if($o['dry']||!$o['yes'])$result=['status'=>$o['dry']?'dry_run':'confirmation_required','confirmation_required'=>true,'slug'=>$identity['slug']??$identity['codename'],'plugin_file'=>'inc/plugins/'.$identity['codename'].'.php','current_active'=>$current,'activation_cache_missing'=>$activationCacheMissing,'requested_state'=>$wantActive?'active':'inactive','callback_effects'=>'MyBB plugin callbacks may update database settings, templates, or plugin data.','managed'=>$identity['managed'],'next_command'=>'mybb plugin '.$p[0].' '.$p[1].' --yes'];
+        else{
+            $previousDirectory=getcwd();
+            try{
+                if(!defined('IN_MYBB'))define('IN_MYBB',1);if(!defined('THIS_SCRIPT'))define('THIS_SCRIPT','mybb-cli');
+                if(!chdir($root))throw new RuntimeException('Cannot change to the MyBB site directory.');
+                ob_start();try{require_once $root.'/global.php';$runtimeOutput=(string)ob_get_contents();}finally{ob_end_clean();}
+                if(!isset($db)||!is_object($db)||!isset($cache)||!is_object($cache)||!isset($plugins)||!is_object($plugins)||!isset($mybb)||!is_object($mybb))throw new RuntimeException('MyBB runtime did not initialize plugin, cache, database, and forum services.');
+                if(trim($runtimeOutput)!=='')throw new RuntimeException('MyBB runtime emitted output; plugin lifecycle change was not applied.');
+                $result=\MyBB\Tooling\PluginLifecycle::setState($root,$identity['codename'],$wantActive,$cache,$plugins);
+            }finally{if(is_string($previousDirectory)&&$previousDirectory!=='')@chdir($previousDirectory);}
+            $result['slug']=$identity['slug']??$identity['codename'];$result['managed']=$identity['managed'];if($identity['managed'])$result['ledger']=$pm->setActivationState($identity['slug'],$wantActive);
+        }
+    }
+    elseif($cmd==='cache'&&($p[0]??'')==='clear') { $dir=$root.'/cache'; if(!is_dir($dir)||is_link($dir)) throw new RuntimeException('Recognized cache directory is absent or unsafe'); $items=[]; foreach(new FilesystemIterator($dir,FilesystemIterator::SKIP_DOTS) as $f) if($f->isFile()&&!$f->isLink()&&preg_match('/^(cache_|datacache)/',$f->getFilename()))$items[]=$f->getPathname(); sort($items,SORT_STRING); if($o['dry'])$result=['would_remove'=>$items,'preserved'=>['plugins.php']]; else { foreach($items as $f)unlink($f); $result=['removed'=>array_map('basename',$items),'preserved'=>['plugins.php']]; } }
+    elseif($cmd==='config'&&($p[0]??'')==='validate') $result=['config_file'=>realpath($root.'/inc/config.php'),'readable'=>is_readable($root.'/inc/config.php'),'note'=>'Database secrets are not loaded or displayed by this check'];
+    elseif($cmd==='user'&&($p[0]??'')==='password-reset') { if(count($p)!==2||!preg_match('/^[1-9][0-9]*$/',$p[1]))throw new InvalidArgumentException('Usage: mybb user password-reset UID [--password-file=PATH --yes]');$uid=(int)$p[1];if($uid<1)throw new InvalidArgumentException('User ID must be a positive integer.');if($o['dry']||!$o['yes'])$result=['status'=>$o['dry']?'dry_run':'confirmation_required','confirmation_required'=>true,'operation'=>'reset_user_password','uid'=>$uid,'changes'=>['replace MyBB password hash','rotate persistent login key','revoke active sessions'],'password_file_read'=>false,'next_step'=>'Review the target user ID. Apply with --yes --password-file=PATH; provide the password only through a protected owner-only file.'];else{if(empty($o['password_file']))throw new InvalidArgumentException('Usage: mybb user password-reset UID --password-file=PATH --yes');$password=protectedPassword($o['password_file'],$root);$result=resetMyBBPassword($root,$uid,$password);unset($password);}
+    }
+    elseif($cmd==='db'&&($p[0]??'')==='check') $result=(new DatabaseTools($root))->check();
+    elseif($cmd==='db'&&($p[0]??'')==='backup') { $dbTools=new DatabaseTools($root);$result=$o['dry']?$dbTools->previewBackup((string)($o['output']??'')):$dbTools->backup((string)($o['output']??'')); }
+    else throw new InvalidArgumentException('Commands: core status|check, plugin list|search|info|install|update|remove|activate|deactivate, user password-reset, cache clear, config validate, db check|backup');
+    if($cmd==='plugin'&&($p[0]??'')==='list'&&!$o['json']){echo "SLUG\tVERSION\tACTIVE\tMANAGED\tFILE\n";foreach($result['plugins'] as $plugin)echo $plugin['slug']."\t".($plugin['version']??'unknown')."\t".($plugin['active']===null?'unknown':($plugin['active']?'yes':'no'))."\t".($plugin['managed']?'yes':'no')."\t".$plugin['file']."\n";echo "activation_cache: ".$result['activation_cache']."\n";}else out($result,$o['json']);if($cmd==='core'&&($p[0]??'')==='check'){foreach($result as $key=>$value)if(is_bool($value)&&!$value)exit(EXIT_ERROR);}exit(EXIT_OK);
+} catch(InvalidArgumentException $e){$message=safeCliMessage($e->getMessage());if($o['json']??false)echo json_encode(['error'=>['code'=>'usage','message'=>$message,'retryable'=>false,'request_id'=>bin2hex(random_bytes(6))]],JSON_UNESCAPED_SLASHES)."\n";else fwrite(STDERR,$message."\n");exit(EXIT_USAGE);} catch(CatalogException $e){$message=safeCliMessage($e->getMessage());if($o['json']??false)echo json_encode(['error'=>['code'=>$e->errorCode,'message'=>$message,'retryable'=>$e->retryable,'request_id'=>$e->requestId??bin2hex(random_bytes(8))]],JSON_UNESCAPED_SLASHES)."\n";else fwrite(STDERR,$e->errorCode.': '.$message."\n");exit($e->retryable?EXIT_RETRYABLE:EXIT_ERROR);} catch(Throwable $e){$message=safeCliMessage($e->getMessage());$code=stableOperationError($e);if($o['json']??false)echo json_encode(['error'=>['code'=>$code,'message'=>$message,'retryable'=>false,'request_id'=>bin2hex(random_bytes(8))]],JSON_UNESCAPED_SLASHES)."\n";else fwrite(STDERR,$code.': '.$message."\n");exit(EXIT_ERROR);}

@@ -1,0 +1,11 @@
+**/vendor/
+**/dist/
+/sample-sites/runtime/
+*.phar
+*.phar.sha256
+.env
+.env.*
+*.key
+*.pem
+*.sql
+*.sqlite

@@ -1,0 +1,27 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+$options=[];$name='clean-1.8.41';
+foreach(array_slice($argv,1) as $arg){if(str_starts_with($arg,'--')){[$key,$value]=array_pad(explode('=',$arg,2),2,true);$options[ltrim($key,'-')]=$value;}elseif($name==='clean-1.8.41')$name=$arg;else{fwrite(STDERR,"Unexpected argument: {$arg}\n");exit(2);}}
+if(isset($options['help'])||isset($options['h'])){fwrite(STDOUT,"Usage: php create-fixture.php [NAME] [--scenario=clean|empty|partial|unrelated|modified-owned|symlink-parent|interrupted] [--version=1.8.41] [--reset]\n");exit(0);}
+if(!preg_match('/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/',$name)){fwrite(STDERR,"Fixture name must be lowercase letters and digits separated by dots or hyphens.\n");exit(2);}
+$scenario=(string)($options['scenario']??'clean');$allowed=['clean','empty','partial','unrelated','modified-owned','symlink-parent','interrupted'];if(!in_array($scenario,$allowed,true)){fwrite(STDERR,'Unknown scenario. Allowed: '.implode(', ',$allowed)."\n");exit(2);}
+$version=(string)($options['version']??'1.8.41');if(!preg_match('/^\d+\.\d+\.\d+$/',$version)){fwrite(STDERR,"Version must use MAJOR.MINOR.PATCH.\n");exit(2);}
+$runtime=__DIR__.'/runtime';if(!is_dir($runtime)&&!mkdir($runtime,0755,true)){fwrite(STDERR,"Cannot create fixture runtime directory.\n");exit(1);}$root=$runtime.'/'.$name;$outsideRoot=$runtime.'/_outside';$outside=$outsideRoot.'/'.$name;$sidecar=$runtime.'/'.$name.'.FIXTURE.json';
+$removeTree=static function(string $path)use(&$removeTree):void{if(is_link($path)||is_file($path)){@unlink($path);return;}if(!is_dir($path))return;foreach(new FilesystemIterator($path,FilesystemIterator::SKIP_DOTS) as $entry)$removeTree($entry->getPathname());@rmdir($path);};
+if(file_exists($root)||is_link($root)){if(!isset($options['reset'])){fwrite(STDERR,"Fixture exists; pass --reset to replace this generated fixture: {$root}\n");exit(1);}if(is_link($root)||!str_starts_with((string)realpath($root),realpath($runtime).DIRECTORY_SEPARATOR)){fwrite(STDERR,"Refusing to reset a fixture outside the generated runtime directory.\n");exit(1);}$removeTree($root);@unlink($sidecar);}
+if(is_dir($outside)){if(!isset($options['reset'])){fwrite(STDERR,"External symlink fixture path already exists; pass --reset to clear it.\n");exit(1);}$removeTree($outside);}
+if(!mkdir($root,0755,true)){fwrite(STDERR,"Cannot create fixture target: {$root}\n");exit(1);}
+if($scenario!=='empty'){
+    foreach(['inc/plugins','inc/languages/english','cache','install'] as $directory)if(!mkdir($root.'/'.$directory,0755,true)&&!is_dir($root.'/'.$directory))throw new RuntimeException('Cannot create fixture directory '.$directory);
+    $core="<?php\nclass MyBBFixture { public \$version = '{$version}'; }\n";file_put_contents($root.'/inc/class_core.php',$core);file_put_contents($root.'/global.php',"<?php\n// Synthetic local test marker; this is not a runnable MyBB distribution.\n");
+    if($scenario==='partial'){file_put_contents($root.'/inc/config.default.php',"<?php\n// Deliberately incomplete installer fixture; no credentials.\n");file_put_contents($root.'/install/index.php',"<?php\n// Synthetic installer marker.\n");}
+    else file_put_contents($root.'/inc/config.php',"<?php\n// Synthetic fixture. No real credentials.\n");
+    if($scenario==='unrelated')file_put_contents($root.'/uploads-user-content.txt','Unrelated synthetic user content; installation code must preserve it.');
+    if($scenario==='modified-owned'){$state=$root.'/inc/plugins/data/mybb-tooling';mkdir($state,0700,true);$installed='original managed plugin bytes';$changed='locally modified plugin bytes';file_put_contents($root.'/inc/plugins/sample_owned.php',$changed);file_put_contents($state.'/installed.json',json_encode(['sample-owned'=>['version'=>'0.1.0','package_sha256'=>hash('sha256',$installed),'installed_at'=>gmdate(DATE_ATOM),'files'=>['inc/plugins/sample_owned.php'=>['sha256'=>hash('sha256',$installed),'role'=>'plugin']]]],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR));}
+    if($scenario==='symlink-parent'){if(!is_dir($outside)&&!mkdir($outside,0755,true))throw new RuntimeException('Cannot create symlink escape target');file_put_contents($outside.'/sentinel.txt','Must remain untouched.');if(!symlink($outside,$root.'/inc/plugins/escape'))throw new RuntimeException('Cannot create symlink fixture on this host.');}
+    if($scenario==='interrupted'){$state=$root.'/inc/plugins/data/mybb-tooling';$transaction=$state.'/transactions/simulated-interrupted-install';mkdir($transaction.'/stage',0700,true);mkdir($transaction.'/backup',0700,true);file_put_contents($transaction.'/journal.json',json_encode(['schema_version'=>1,'status'=>'applying','fixture_only'=>true,'files'=>['inc/plugins/sample_interrupted.php'=>['state'=>'staged']]],JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR));file_put_contents($transaction.'/stage/sample_interrupted.php','staged but unapplied bytes');}
+}
+$metadata=['name'=>$name,'scenario'=>$scenario,'mybb_version'=>$version,'php_tooling_requirement'=>'>=8.2','kind'=>$scenario==='empty'?'empty-target':'synthetic-site-shell','contains_real_data'=>false,'runnable_forum'=>false,'note'=>'Synthetic test fixture only. It does not contain MyBB application code, a database, production credentials, or real user data.'];file_put_contents($sidecar,json_encode($metadata,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR));
+fwrite(STDOUT,"Created {$scenario} synthetic fixture: {$root}\nMetadata: {$sidecar}\n");

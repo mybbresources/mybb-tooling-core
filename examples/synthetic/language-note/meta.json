@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "slug": "sample-language-note",
+  "name": "Synthetic Language Note",
+  "version": "0.1.0",
+  "description": "A sample plugin package with one English language file.",
+  "authors": ["MyBB Tooling Test Fixtures"],
+  "license": "MIT",
+  "source": { "type": "original" },
+  "requirements": { "mybb": ">=1.8.41 <1.9.0", "php": ">=8.2" },
+  "package": { "url": "https://plugins.mybbresources.com/api/v1/plugins/sample-language-note/releases/0.1.0/package", "sha256": "", "size": 0, "signature": "", "key_id": "" },
+  "files": [
+    { "source": "upload/inc/plugins/sample_language_note.php", "destination": "inc/plugins/sample_language_note.php", "role": "plugin" },
+    { "source": "upload/inc/languages/english/sample_language_note.lang.php", "destination": "inc/languages/english/sample_language_note.lang.php", "role": "language" }
+  ],
+  "uninstall": { "remove_owned_files": true, "preserve_user_data": true }
+}

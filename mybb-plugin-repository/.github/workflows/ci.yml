@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    name: Admin CP repository plugin syntax
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+      - name: Lint plugin files
+        run: |
+          php -l inc/plugins/mybbresources_repository.php
+          php -l admin/modules/config/mybbresources_repository.php

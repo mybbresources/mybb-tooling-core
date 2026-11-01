@@ -1,0 +1,53 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  tooling:
+    name: Public tooling (${{ matrix.os }}, PHP ${{ matrix.php }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15-intel, macos-15]
+        php: ['8.2', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, mysqli, sodium, zip
+          coverage: none
+      - name: Validate public distribution boundary
+        run: php tools/check-public-tree.php
+      - name: Validate and install Composer packages
+        run: |
+          composer validate --no-check-publish
+          composer validate --no-check-publish --working-dir=mybb-cli
+          composer validate --no-check-publish --working-dir=mybb-installer-cli
+          composer install --no-interaction --prefer-dist --no-progress --working-dir=mybb-cli
+          composer install --no-interaction --prefer-dist --no-progress --working-dir=mybb-installer-cli
+      - name: Verify shared source snapshots
+        run: php tools/sync-shared-package.php --check
+      - name: Lint public PHP
+        shell: bash
+        run: |
+          set -euo pipefail
+          find src tools tests mybb-cli/bin mybb-installer-cli/bin mybb-installer-cli/src mybb-plugin-repository sample-sites -type f -name '*.php' -print0 |
+            while IFS= read -r -d '' file; do php -l "$file" >/dev/null; done
+      - name: Run public safety and contract suite
+        run: php tests/run.php
+      - name: Verify protected key generation
+        run: php tests/catalog-keygen-safety.php
+      - name: Verify Admin CP hooks and lifecycle
+        run: php tests/repository-plugin-hook-harness.php
+      - name: Verify protected user operations
+        run: php tests/user-cli-safety.php
+      - name: Build and execute portable PHARs
+        run: php tests/phar-smoke.php
+      - name: Verify signed installer bootstrap
+        run: php tests/phar-bootstrap-smoke.php

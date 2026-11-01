@@ -1,0 +1,256 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+$loaded=false;for($dir=__DIR__;$dir!==dirname($dir);$dir=dirname($dir))if(is_file($dir.'/vendor/autoload.php')){require $dir.'/vendor/autoload.php';$loaded=true;break;}if(!$loaded){$fallback=dirname(__DIR__,2).'/autoload.php';if(!is_file($fallback)){fwrite(STDERR,"Shared tooling package is missing; install this project with Composer.\n");exit(1);}require $fallback;}
+require_once dirname(__DIR__).'/src/InitialSetup.php';
+require_once dirname(__DIR__).'/src/InstallPlanOutput.php';
+require_once dirname(__DIR__).'/src/InstallRecovery.php';
+require_once dirname(__DIR__).'/src/InstallTrust.php';
+
+function jsonMode(): bool { return in_array('--json',$GLOBALS['argv'],true); }
+function emit(array $v,int $exit=0): never { echo jsonMode()?json_encode($v,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)."\n":implode("\n",array_map(fn($k)=>$k.': '.(is_scalar($v[$k]??null)?(string)$v[$k]:json_encode($v[$k])),array_keys($v)))."\n"; exit($exit); }
+function writePlan(string $title,array $sections):void{fwrite(STDERR,MyBB\Installer\InstallPlanOutput::render($title,$sections));}
+function resolveTargetPath(string $requested): string { $path=rtrim($requested,"/\\");if($path==='')$path=DIRECTORY_SEPARATOR;if($path==='.')$path=getcwd();elseif($path==='..')$path=dirname(getcwd());if($path===DIRECTORY_SEPARATOR||preg_match('/^[A-Za-z]:$/',$path))throw new RuntimeException('Refusing filesystem root as install target');if(is_link($path))throw new RuntimeException('Target directory cannot be a symlink');$leaf=basename($path);if($leaf===''||$leaf==='.'||$leaf==='..')throw new RuntimeException('Target path must name a directory');$parent=realpath(dirname($path));if($parent===false)throw new RuntimeException('Target parent directory must already exist');$resolved=$parent.DIRECTORY_SEPARATOR.$leaf;if(is_link($resolved))throw new RuntimeException('Target directory cannot be a symlink');if(file_exists($resolved)){if(!is_dir($resolved))throw new RuntimeException('Target must be a directory');$resolved=realpath($resolved);if($resolved===false)throw new RuntimeException('Cannot resolve target directory');}$normalized=str_replace('\\','/',$resolved);if($normalized==='/'||preg_match('#^/(etc|usr|bin|sbin|System|Library)(/|$)#i',$normalized)||preg_match('#^[A-Za-z]:/(Windows|Program Files|Program Files \(x86\)|System32)(/|$)#i',$normalized))throw new RuntimeException('Refusing unsafe target directory');$home=getenv('HOME');if($home&&realpath($home)!==false&&$normalized===str_replace('\\','/',realpath($home)))throw new RuntimeException('Refusing the home directory as install target');return $resolved; }
+function fetch(string $url,int $limit=4194304): string { if(!str_starts_with($url,'https://'))throw new RuntimeException('HTTPS is required'); $host=parse_url($url,PHP_URL_HOST); if(!in_array($host,['mybb.com','www.mybb.com','resources.mybb.com'],true))throw new RuntimeException('Refusing non-official host'); $ch=curl_init($url);$buf='';curl_setopt_array($ch,[CURLOPT_FOLLOWLOCATION=>false,CURLOPT_CONNECTTIMEOUT=>10,CURLOPT_TIMEOUT=>45,CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_SSL_VERIFYHOST=>2,CURLOPT_USERAGENT=>'mybb-installer-cli/0.1 (+https://mybbresources.com)',CURLOPT_WRITEFUNCTION=>function($c,$chunk)use(&$buf,$limit){$buf.=$chunk;if(strlen($buf)>$limit)return 0;return strlen($chunk);}]);$ok=curl_exec($ch);$code=curl_getinfo($ch,CURLINFO_RESPONSE_CODE);$err=curl_error($ch);curl_close($ch);if($ok===false||$code<200||$code>=300)throw new RuntimeException('Official download request failed: '.$err.' (HTTP '.$code.')');return $buf; }
+function persistInstallJournal(string $path,array $journal):void{$tmp=$path.'.'.bin2hex(random_bytes(6)).'.tmp';$bytes=json_encode($journal,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR);if(file_put_contents($tmp,$bytes,LOCK_EX)!==strlen($bytes))throw new RuntimeException('Could not write installer transaction journal');@chmod($tmp,0600);if(!rename($tmp,$path)){@unlink($tmp);throw new RuntimeException('Could not publish installer transaction journal');}}
+function journalBootstrapTransaction(string $target,string $path,array &$journal,string $journalPath):void{$prefix=rtrim($target,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR.'inc/plugins/data/mybb-tooling/transactions'.DIRECTORY_SEPARATOR;if(!str_starts_with($path,$prefix))throw new RuntimeException('Bootstrap transaction path escaped the installer state directory');$relative='inc/plugins/data/mybb-tooling/transactions/'.basename($path);MyBB\Tooling\Manifest::validateRelativePath($relative);if(!preg_match('/^[a-z0-9][a-z0-9-]*-\d{14}-[a-f0-9]{6}$/D',basename($relative)))throw new RuntimeException('Bootstrap transaction directory name is invalid');$journal['bootstrap_transactions']??=[];if(!is_array($journal['bootstrap_transactions'])||!array_is_list($journal['bootstrap_transactions']))throw new RuntimeException('Installer transaction journal has an invalid bootstrap transaction list');if(!in_array($relative,$journal['bootstrap_transactions'],true)){$journal['bootstrap_transactions'][]=$relative;persistInstallJournal($journalPath,$journal);}}
+function bootstrapJournalDigests(array $entry):array{return MyBB\Installer\InstallRecovery::bootstrapJournalDigests($entry);}
+function removeBootstrapTransactionDirectories(string $target,array $relativePaths):array{return MyBB\Installer\InstallRecovery::removeBootstrapTransactionDirectories($target,$relativePaths);}
+function findUnjournaledBootstrapTransactions(string $target):array{$root=$target.'/inc/plugins/data/mybb-tooling/transactions';if(!file_exists($root)&&!is_link($root))return [];if(is_link($root)||!is_dir($root))return ['inc/plugins/data/mybb-tooling/transactions'];$paths=[];try{foreach(new FilesystemIterator($root,FilesystemIterator::SKIP_DOTS) as $item)$paths[]='inc/plugins/data/mybb-tooling/transactions/'.$item->getFilename();}catch(Throwable){$paths[]='inc/plugins/data/mybb-tooling/transactions';}return $paths;}
+function ensureInstallDirectories(string $target,string $relative,array &$journal,string $journalPath):void{if($relative==='.'||$relative==='')return;MyBB\Tooling\Manifest::validateRelativePath($relative);$cursor=$target;$built=[];foreach(explode('/',$relative) as $part){$built[]=$part;$cursor.=DIRECTORY_SEPARATOR.$part;if(is_link($cursor))throw new RuntimeException('Refusing a symlinked target directory: '.$relative);if(!is_dir($cursor)){$known=array_map('strtolower',$journal['directories']);$created=implode('/',$built);if(!in_array(strtolower($created),$known,true))$journal['directories'][]=$created;persistInstallJournal($journalPath,$journal);if(!@mkdir($cursor,0755))throw new RuntimeException('Could not create target directory: '.$relative);}$real=realpath($cursor);if($real===false||!str_starts_with($real,rtrim($target,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR))throw new RuntimeException('Target directory resolved outside the install root: '.$relative);if(is_link($cursor))throw new RuntimeException('Refusing a symlinked target directory: '.$relative);}}
+function rollbackInstallJournal(string $target,string $path):array
+{
+    $raw=@file_get_contents($path);
+    if($raw===false)throw new RuntimeException('No installer transaction journal exists for this target');
+    $journal=json_decode($raw,true,512,JSON_THROW_ON_ERROR);
+    if(!is_array($journal)||($journal['schema_version']??null)!==1||($journal['target']??null)!==$target||!is_array($journal['files']??null))throw new RuntimeException('Installer transaction journal is invalid or belongs to another target');
+    if(($journal['status']??'')==='complete')throw new RuntimeException('This installation is committed; rollback is not available through recover');
+    $hasTransactionJournal=array_key_exists('bootstrap_transactions',$journal);
+    $transactionPaths=$journal['bootstrap_transactions']??[];
+    if(!is_array($transactionPaths)||!array_is_list($transactionPaths))throw new RuntimeException('Installer transaction journal has an invalid bootstrap transaction list');
+    foreach($transactionPaths as $transactionPath){
+        if(!is_string($transactionPath)||!str_starts_with($transactionPath,'inc/plugins/data/mybb-tooling/transactions/')||!preg_match('/^[a-z0-9][a-z0-9-]*-\d{14}-[a-f0-9]{6}$/D',basename($transactionPath)))throw new RuntimeException('Installer transaction journal contains an invalid bootstrap transaction path');
+        MyBB\Tooling\Manifest::validateRelativePath($transactionPath);
+    }
+    $alreadyRolledBack=($journal['status']??'')==='rolled_back';
+    $removed=$alreadyRolledBack?($journal['rollback_removed']??[]):[];
+    $preserved=$alreadyRolledBack?($journal['rollback_preserved']??[]):[];
+    $removedDirectories=[];
+    if(!$alreadyRolledBack){
+        foreach(array_reverse($journal['files']) as $entry){
+            $relative=(string)($entry['path']??'');
+            try{MyBB\Tooling\Manifest::validateRelativePath($relative);}catch(Throwable){$preserved[]=$relative?:'(invalid journal path)';continue;}
+            $cursor=$target;$unsafe=false;$parts=explode('/',$relative);
+            foreach($parts as $i=>$part){$cursor.=DIRECTORY_SEPARATOR.$part;if(is_link($cursor)){$unsafe=true;break;}if($i<count($parts)-1&&!is_dir($cursor)&&file_exists($cursor)){$unsafe=true;break;}}
+            if($unsafe){$preserved[]=$relative;continue;}
+            if(!file_exists($cursor))continue;
+            $digest=(string)@hash_file('sha256',$cursor);
+            if(!is_file($cursor)||!in_array($digest,bootstrapJournalDigests($entry),true)){$preserved[]=$relative;continue;}
+            if(!@unlink($cursor)){$preserved[]=$relative;continue;}
+            $removed[]=$relative;$dir=dirname($cursor);
+            while($dir!==$target&&str_starts_with($dir,$target.DIRECTORY_SEPARATOR)){if(!@rmdir($dir))break;$dir=dirname($dir);}
+        }
+        foreach(array_reverse($journal['directories']??[]) as $relativeDir){
+            try{MyBB\Tooling\Manifest::validateRelativePath((string)$relativeDir);}catch(Throwable){$preserved[]=(string)$relativeDir.' (invalid directory path)';continue;}
+            $dirPath=$target;$unsafeDir=false;
+            foreach(explode('/',(string)$relativeDir) as $part){$dirPath.=DIRECTORY_SEPARATOR.$part;if(is_link($dirPath)){$unsafeDir=true;break;}}
+            if($unsafeDir){$preserved[]=(string)$relativeDir.' (symlinked directory)';continue;}
+            if(is_dir($dirPath)){if(@rmdir($dirPath))$removedDirectories[]=(string)$relativeDir;else $preserved[]=(string)$relativeDir.' (directory is not empty)';}
+        }
+    }
+    $removedTransactions=[];$preservedTransactions=[];
+    if(!$hasTransactionJournal){
+        $preservedTransactions=findUnjournaledBootstrapTransactions($target);
+        foreach($preservedTransactions as $transactionPath)$preserved[]='untracked bootstrap transaction data preserved: '.$transactionPath;
+    }elseif(!$preserved){
+        $cleanup=removeBootstrapTransactionDirectories($target,$transactionPaths);
+        $removedTransactions=$cleanup['removed'];$preservedTransactions=$cleanup['preserved'];
+        foreach($preservedTransactions as $transactionPath)$preserved[]='bootstrap transaction recovery data: '.$transactionPath;
+    }else $preservedTransactions=$transactionPaths;
+    $journal['status']=$preserved?'rollback_incomplete':'rolled_back';
+    $journal['rollback_removed_directories']=array_values(array_unique(array_merge($journal['rollback_removed_directories']??[],$removedDirectories)));
+    $journal['rollback_removed']=array_values(array_unique($removed));
+    $journal['rollback_preserved']=array_values(array_unique($preserved));
+    $journal['rollback_removed_bootstrap_transactions']=array_values(array_unique(array_merge($journal['rollback_removed_bootstrap_transactions']??[],$removedTransactions)));
+    if($hasTransactionJournal)$journal['bootstrap_transactions']=$preservedTransactions;
+    $journal['recovered_at']=gmdate(DATE_ATOM);
+    persistInstallJournal($path,$journal);
+    return ['status'=>$journal['status'],'removed'=>$journal['rollback_removed'],'preserved'=>$journal['rollback_preserved'],'removed_transactions'=>$removedTransactions,'preserved_transactions'=>$preservedTransactions,'journal'=>$path];
+}
+function journalBootstrapWrites(string $target,array $packages,string $journalPath,array &$journal):callable
+{
+    $known=[];foreach($journal['files'] as $entry)$known[strtolower((string)$entry['path'])]=true;
+    $add=static function(string $relative,string $digest,string $component)use(&$journal,&$known,$journalPath):void{
+        MyBB\Tooling\Manifest::validateRelativePath($relative);$key=strtolower($relative);
+        if(isset($known[$key])){foreach($journal['files'] as &$existing){if(strtolower((string)$existing['path'])===$key){if(($existing['component']??'')!=='bootstrap_state')throw new RuntimeException('Bootstrap path collides with an official MyBB file: '.$relative);$variants=bootstrapJournalDigests($existing);if(!in_array($digest,$variants,true))$variants[]=$digest;$existing['sha256']=$digest;if(count($variants)>1)$existing['sha256_variants']=$variants;$existing['status']='planned';unset($existing);persistInstallJournal($journalPath,$journal);return;}}unset($existing);throw new RuntimeException('Duplicate bootstrap destination: '.$relative);}
+        $journal['files'][]=['path'=>$relative,'sha256'=>$digest,'status'=>'planned','component'=>$component];$known[$key]=true;persistInstallJournal($journalPath,$journal);
+    };
+    foreach($packages as $package){$archive=new ZipArchive();if($archive->open($package['zip'])!==true)throw new RuntimeException('Cannot open signed bootstrap archive for recovery planning');try{foreach($package['manifest']['files'] as $file){$contents=$archive->getFromName($file['source']);if($contents===false)throw new RuntimeException('Bootstrap archive is missing a declared source: '.$file['source']);$add($file['destination'],hash('sha256',$contents),'bootstrap_package');}}finally{$archive->close();}}
+    $state='inc/plugins/data/mybb-tooling/';
+    $add($state.'.htaccess',hash('sha256',"Require all denied\n"),'bootstrap_state');
+    $add($state.'index.html',hash('sha256',''),'bootstrap_state');
+    $add($state.'manager.lock',hash('sha256',''),'bootstrap_state');
+    return static function(string $absolutePath,string $digest)use($target,$add):void{
+        $root=rtrim($target,DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+        if(!str_starts_with($absolutePath,$root))throw new RuntimeException('Bootstrap state write escaped the installer target');
+        $relative=str_replace(DIRECTORY_SEPARATOR,'/',substr($absolutePath,strlen($root)));
+        $add($relative,$digest,'bootstrap_state');
+    };
+}
+function removeBootstrapWritesForResume(string $target,string $journalPath,array &$journal):void
+{
+    MyBB\Installer\InstallRecovery::removeBootstrapWritesForResume($target,$journalPath,$journal,'persistInstallJournal');
+}
+function validateResumeTarget(string $target,array $journal):void
+{
+    $known=[];foreach($journal['files'] as $entry){$path=(string)($entry['path']??'');MyBB\Tooling\Manifest::validateRelativePath($path);$known[strtolower($path)]=true;}
+    if(!is_dir($target))return;
+    foreach(new RecursiveIteratorIterator(new RecursiveDirectoryIterator($target,FilesystemIterator::SKIP_DOTS)) as $item){$absolute=$item->getPathname();if($item->isLink())throw new RuntimeException('Cannot resume with symlinks in the target: '.$absolute);if(!$item->isFile())continue;$relative=str_replace(DIRECTORY_SEPARATOR,'/',substr($absolute,strlen(rtrim($target,DIRECTORY_SEPARATOR))+1));
+        if(isset($known[strtolower($relative)]))continue;
+        if(str_starts_with($relative,'inc/plugins/data/mybb-tooling/transactions/')){$tracked=$journal['bootstrap_transactions']??null;if($tracked===null)continue;$knownTransaction=false;foreach($tracked as $transactionPath)if(str_starts_with($relative,$transactionPath.'/')){$knownTransaction=true;break;}if($knownTransaction)continue;throw new RuntimeException('Cannot resume because the tooling state contains an unjournaled transaction artifact: '.$relative);}
+        throw new RuntimeException('Cannot resume because the target contains an unjournaled file: '.$relative);
+    }
+}
+function validateResumeJournal(array $journal,string $target):void
+{
+    if(($journal['schema_version']??null)!==1||($journal['target']??null)!==$target||!in_array(($journal['status']??''),['applying','files_ready','bootstrap_applying'],true)||!is_string($journal['version']??null)||!is_string($journal['source']??null)||!array_key_exists('core_sha512',$journal)||!is_bool($journal['core_only']??null)||!array_key_exists('bootstrap_package_sha256',$journal)||!array_key_exists('repository_package_sha256',$journal)||!is_array($journal['files']??null)||!is_array($journal['directories']??null))throw new RuntimeException('Installer transaction journal is invalid, committed, rolled back, or not resumable');
+    if($journal['core_sha512']!==null&&(!is_string($journal['core_sha512'])||!preg_match('/^[a-f0-9]{128}$/',$journal['core_sha512'])))throw new RuntimeException('Installer transaction journal contains an invalid official checksum');
+    if($journal['bootstrap_package_sha256']!==null&&(!is_string($journal['bootstrap_package_sha256'])||!preg_match('/^[a-f0-9]{64}$/',$journal['bootstrap_package_sha256'])))throw new RuntimeException('Installer transaction journal contains an invalid bootstrap digest');
+    $known=[];foreach($journal['files'] as $entry){if(!is_array($entry)||!is_string($entry['path']??null)||!is_string($entry['sha256']??null)||!preg_match('/^[a-f0-9]{64}$/',$entry['sha256'])||!in_array(($entry['status']??''),['planned','applied'],true)||!in_array(($entry['component']??''),['mybb_core','bootstrap_package','bootstrap_state'],true))throw new RuntimeException('Installer transaction journal contains an invalid file record');MyBB\Tooling\Manifest::validateRelativePath($entry['path']);if(isset($entry['sha256_variants'])){if(($entry['component']??null)!=='bootstrap_state'||!is_array($entry['sha256_variants'])||!array_is_list($entry['sha256_variants']))throw new RuntimeException('Installer transaction journal contains invalid state-file digest variants');foreach($entry['sha256_variants'] as $digest)if(!is_string($digest)||!preg_match('/^[a-f0-9]{64}$/',$digest))throw new RuntimeException('Installer transaction journal contains an invalid state-file digest variant');}$pathKey=strtolower($entry['path']);if(isset($known[$pathKey]))throw new RuntimeException('Installer transaction journal contains duplicate normalized file paths');$known[$pathKey]=true;}
+    foreach($journal['directories'] as $directory){if(!is_string($directory))throw new RuntimeException('Installer transaction journal contains an invalid directory record');MyBB\Tooling\Manifest::validateRelativePath($directory);}
+    $transactions=$journal['bootstrap_transactions']??[];if(!is_array($transactions)||!array_is_list($transactions))throw new RuntimeException('Installer transaction journal contains an invalid bootstrap transaction list');foreach($transactions as $transaction){if(!is_string($transaction)||!str_starts_with($transaction,'inc/plugins/data/mybb-tooling/transactions/')||!preg_match('/^[a-z0-9][a-z0-9-]*-\d{14}-[a-f0-9]{6}$/D',basename($transaction)))throw new RuntimeException('Installer transaction journal contains an invalid bootstrap transaction path');MyBB\Tooling\Manifest::validateRelativePath($transaction);}
+}
+try {
+ $args=array_slice($argv,1);$command=array_shift($args)??'help';$opts=[];$position=[];foreach($args as $a){if(str_starts_with($a,'--')){[$k,$v]=array_pad(explode('=',$a,2),2,true);$opts[ltrim($k,'-')]=$v;}else $position[]=$a;}
+ if(in_array($command,['help','--help','-h'],true)){fwrite(STDOUT,"Usage: mybb-install check [PATH] | install --path=EMPTY_DIR [--setup-config=PROTECTED_JSON] [--version=X] [--bootstrap-dir=PATH] [--trusted-keys=PATH] [--dry-run] [--resume] [--allow-unverified] [--core-only] | configure --path=SITE [--setup-config=PROTECTED_JSON] | upgrade --path=SITE --backup-dir=EXISTING_DIR [--version=X] [--dry-run|--yes] | upgrade --path=SITE --resume --journal=FILE [--dry-run|--yes] | recover --path=TARGET --rollback | recover --upgrade-journal=FILE --rollback\n");exit(0);}
+ if($command==='recover'){if(!isset($opts['rollback']))throw new InvalidArgumentException('Usage: mybb-install recover --path=TARGET --rollback or recover --upgrade-journal=FILE --rollback');if(isset($opts['upgrade-journal'])){$result=MyBB\Tooling\OfficialMyBBUpgrade::rollback((string)$opts['upgrade-journal']);}else{$target=resolveTargetPath((string)($opts['path']??$position[0]??throw new InvalidArgumentException('--path is required')));$result=rollbackInstallJournal($target,$target.'.mybb-install-transaction.json');}emit($result,($result['status']??'')==='rollback_incomplete'?1:0);}
+ if($command==='configure'){$target=resolveTargetPath((string)($opts['path']??$position[0]??throw new InvalidArgumentException('--path is required')));$setupPath=(string)($opts['setup-config']??'');$setup=$setupPath!==''?MyBB\Installer\InitialSetup::loadConfig($setupPath,$target):MyBB\Installer\InitialSetup::prompt();emit(MyBB\Installer\InitialSetup::configure($target,$setup));}
+ if($command==='check') {
+  $target=resolveTargetPath((string)($opts['path']??$position[0]??getcwd()));
+  $exists=is_dir($target);
+  $free=@disk_free_space($exists?$target:dirname($target));
+  $writable=$exists?is_writable($target):is_writable(dirname($target));
+  $extensions=['curl'=>extension_loaded('curl'),'zip'=>extension_loaded('zip'),'sodium'=>extension_loaded('sodium'),'mysqli'=>extension_loaded('mysqli')];
+  $markers=is_file($target.'/inc/config.php')&&is_file($target.'/global.php');
+  $populated=$exists&&count(scandir($target))>2;
+  $webAssumptions=[
+   'status'=>'manual_review_required',
+   'checks'=>[
+    ['id'=>'document_root','status'=>'not_verifiable_from_cli','assumption'=>'Configure the web server document root to serve this MyBB site directory.'],
+    ['id'=>'web_php_parity','status'=>'not_verifiable_from_cli','assumption'=>'The web PHP SAPI must provide a compatible PHP version and the required MyBB extensions reported for this CLI runtime.'],
+    ['id'=>'backup_location','status'=>'manual','assumption'=>'Keep upgrade backups outside the public web root.'],
+   ],
+  ];
+  $result=['php'=>PHP_VERSION,'php_sapi'=>PHP_SAPI,'php_supported'=>PHP_VERSION_ID>=80200,'extensions'=>$extensions,'curl'=>$extensions['curl'],'zip'=>$extensions['zip'],'sodium'=>$extensions['sodium'],'mysqli'=>$extensions['mysqli'],'archive_support'=>['zip_extension'=>$extensions['zip'],'zip_archive_class'=>class_exists(ZipArchive::class)],'target'=>$target,'target_exists'=>$exists,'target_writable'=>$writable,'target_populated'=>$populated,'mybb_detected'=>$markers,'installation_mode'=>$markers?'existing_mybb_detected':($populated?'refuse_populated_target':'fresh_install'),'free_bytes'=>$free===false?null:(int)$free,'required_free_bytes'=>100000000,'sufficient_free_space'=>$free!==false&&$free>=100000000,'web_server_assumptions'=>$webAssumptions,'read_only'=>true];
+  $result['ready']=$result['php_supported']&&$extensions['curl']&&$extensions['zip']&&$result['archive_support']['zip_archive_class']&&$extensions['sodium']&&$extensions['mysqli']&&$result['target_writable']&&$result['sufficient_free_space']&&!($populated&&!$markers);
+  if(jsonMode())emit($result,$result['ready']?0:1);
+  foreach($result as $k=>$v)fwrite(STDOUT,$k.': '.(is_bool($v)?($v?'yes':'no'):(is_scalar($v)?(string)$v:json_encode($v,JSON_UNESCAPED_SLASHES)))."\n");
+  exit($result['ready']?0:1);
+ }
+ if(!in_array($command,['install','upgrade'],true))throw new InvalidArgumentException('Commands: check, install, upgrade, recover');
+ if(isset($opts['setup-config'])&&$command!=='install')throw new InvalidArgumentException('--setup-config applies only to install or configure.');
+ if(isset($opts['core-only'])&&$command!=='install')throw new InvalidArgumentException('--core-only applies only to install');
+ $target=resolveTargetPath((string)($opts['path']??$position[0]??throw new InvalidArgumentException('--path is required')));
+ $resumeOption=isset($opts['resume']);$resumeRequested=$command==='install'&&$resumeOption;$upgradeResumeRequested=$command==='upgrade'&&$resumeOption;if($resumeOption&&!$resumeRequested&&!$upgradeResumeRequested)throw new InvalidArgumentException('--resume applies only to install or upgrade');if($resumeRequested&&isset($opts['dry-run']))throw new InvalidArgumentException('Install resume cannot be combined with --dry-run');
+ $txn=$target.'.mybb-install-transaction.json';$resumeJournal=null;
+ if($resumeRequested){$raw=@file_get_contents($txn);if($raw===false)throw new RuntimeException('No installer transaction journal exists to resume');$resumeJournal=json_decode($raw,true,512,JSON_THROW_ON_ERROR);if(!is_array($resumeJournal))throw new RuntimeException('Installer transaction journal is invalid');validateResumeJournal($resumeJournal,$target);validateResumeTarget($target,$resumeJournal);}
+ $upgradeJournal=null;$currentVersion=null;$backupDirectory=null;
+ if($command==='install'&&is_dir($target)&&count(scandir($target))>2&&!$resumeRequested)throw new RuntimeException('Install target is not empty; use the separate upgrade command for an existing MyBB site');
+ if($command==='upgrade'){
+  if(!is_file($target.'/inc/config.php')||!is_file($target.'/global.php'))throw new RuntimeException('Upgrade target is not a configured MyBB site');
+  if($upgradeResumeRequested){$journalPath=(string)($opts['journal']??'');$journalReal=$journalPath!==''&&!is_link($journalPath)?realpath($journalPath):false;if($journalReal===false||!is_file($journalReal))throw new InvalidArgumentException('Upgrade resume requires --journal=BACKUP_DIR/transaction.json');$upgradeJournal=json_decode((string)file_get_contents($journalReal),true,512,JSON_THROW_ON_ERROR);if(!is_array($upgradeJournal)||($upgradeJournal['kind']??null)!=='mybb-core-upgrade'||($upgradeJournal['site']??null)!==$target)throw new RuntimeException('Upgrade journal is invalid or belongs to another site');$backupDirectory=(string)($upgradeJournal['backup_directory']??'');$currentVersion=(string)($upgradeJournal['previous_mybb_version']??'');if($currentVersion===''||!isset($upgradeJournal['release_version'])||!isset($upgradeJournal['source_url'])||!array_key_exists('release_sha512',$upgradeJournal))throw new RuntimeException('Upgrade journal lacks the official release verification metadata required for resume');if(!isset($opts['dry-run'])&&!isset($opts['yes']))throw new RuntimeException('Upgrade resume applies core files; review with --dry-run, then repeat with --yes');}
+  else{$currentVersion=MyBB\Tooling\Compatibility::detectMybbVersion($target);$backupParent=realpath((string)($opts['backup-dir']??''));if($backupParent===false||!is_dir($backupParent))throw new RuntimeException('Upgrade requires --backup-dir pointing to an existing directory outside the MyBB site');$backupCandidate=$backupParent.DIRECTORY_SEPARATOR.'mybb-upgrade-'.str_replace('.','-',$currentVersion).'-'.gmdate('Ymd-His').'-'.bin2hex(random_bytes(3));$backupDirectory=MyBB\Tooling\OfficialMyBBUpgrade::validateBackupDirectory($target,$backupCandidate);}
+  if(!MyBB\Tooling\Compatibility::satisfies($currentVersion,'>=1.8.40 <1.9.0'))throw new RuntimeException('Installed MyBB version is outside the supported upgrade range: '.$currentVersion);
+  if(!$upgradeResumeRequested&&!isset($opts['dry-run'])&&!isset($opts['yes']))throw new RuntimeException('File upgrades replace official core files; review with --dry-run, then repeat with --yes');
+ }
+ $free=@disk_free_space(is_dir($target)?$target:dirname($target));if($free===false||$free<100000000)throw new RuntimeException('At least 100 MB of free disk space is required or could not be determined');
+ if(PHP_VERSION_ID<80200||!extension_loaded('curl')||!extension_loaded('zip')||!class_exists(ZipArchive::class)||!extension_loaded('sodium')||!extension_loaded('mysqli'))throw new RuntimeException('PHP 8.2+, curl, zip/ZipArchive, sodium and mysqli are required');
+ $bootstrapDir=(string)($opts['bootstrap-dir']??dirname(__DIR__).'/dist');$bootstrapFiles=[$bootstrapDir.'/bootstrap.json',$bootstrapDir.'/bootstrap.zip',$bootstrapDir.'/repository.json',$bootstrapDir.'/repository.zip',$bootstrapDir.'/trusted-keys.json'];$coreOnly=isset($opts['core-only']);$bootstrapReady=$command==='install'&&!$coreOnly&&count(array_filter($bootstrapFiles,'is_file'))===5;
+ if($command==='install'&&!$coreOnly&&count(array_filter($bootstrapFiles,'file_exists'))!==0&&!$bootstrapReady)throw new RuntimeException('Bootstrap assets must include bootstrap.json, bootstrap.zip, repository.json, repository.zip, and trusted-keys.json together');
+ if($command==='install'&&!$coreOnly&&!$bootstrapReady)throw new RuntimeException('A pinned signed companion bundle is required for install; build/provide bootstrap assets or explicitly choose --core-only');
+ $setupConfig=null;$setupPreflight=null;
+ if($command==='install'&&!isset($opts['dry-run'])){$setupConfig=!empty($opts['setup-config'])?MyBB\Installer\InitialSetup::loadConfig((string)$opts['setup-config'],$target):MyBB\Installer\InitialSetup::prompt();$setupPreflight=MyBB\Installer\InitialSetup::preflightDatabase($setupConfig);}
+ elseif($command==='install'&&!empty($opts['setup-config'])){$setupConfig=MyBB\Installer\InitialSetup::loadConfig((string)$opts['setup-config'],$target);$setupPreflight=MyBB\Installer\InitialSetup::preflightDatabase($setupConfig);}
+ $bootstrapManifest=null;$bootstrapZip=null;$repositoryManifest=null;$repositoryZip=null;$bootstrapKeys=[];
+ if($bootstrapReady){
+  $bootstrapManifest=json_decode((string)file_get_contents($bootstrapFiles[0]),true,512,JSON_THROW_ON_ERROR);
+  $repositoryManifest=json_decode((string)file_get_contents($bootstrapFiles[2]),true,512,JSON_THROW_ON_ERROR);
+  $bundleKeys=json_decode((string)file_get_contents($bootstrapFiles[4]),true,512,JSON_THROW_ON_ERROR);
+  $trustPath=(string)($opts['trusted-keys']??dirname(__DIR__).'/config/trusted-keys.json');
+  MyBB\Installer\InstallTrust::assertSeparate($trustPath,$bootstrapFiles[4]);
+  $bootstrapKeys=json_decode((string)file_get_contents($trustPath),true,512,JSON_THROW_ON_ERROR);
+  if(!is_array($bootstrapManifest)||!is_array($repositoryManifest)||!is_array($bundleKeys)||!is_array($bootstrapKeys)||!$bootstrapKeys)throw new RuntimeException('A non-empty installer-pinned trusted key map is required to verify the bootstrap packages');
+  foreach([[$bootstrapManifest,'mybb-toolchain'],[$repositoryManifest,'mybbresources-repository']] as [$manifest,$expectedSlug]){MyBB\Tooling\Manifest::validate($manifest);MyBB\Tooling\Manifest::verifySignature($manifest,$bootstrapKeys);$keyId=$manifest['package']['key_id'];if($manifest['slug']!==$expectedSlug)throw new RuntimeException('Bootstrap manifest has an unexpected package identity');if(!isset($bundleKeys[$keyId])||!isset($bootstrapKeys[$keyId])||!hash_equals((string)$bundleKeys[$keyId]['public_key'],(string)$bootstrapKeys[$keyId]['public_key']))throw new RuntimeException('Bootstrap trust map does not match a package signing key');}
+  $bootstrapZip=$bootstrapFiles[1];$repositoryZip=$bootstrapFiles[3];
+  foreach([[$bootstrapZip,$bootstrapManifest],[$repositoryZip,$repositoryManifest]] as [$archivePath,$manifest])if(filesize($archivePath)!==$manifest['package']['size']||!hash_equals($manifest['package']['sha256'],hash_file('sha256',$archivePath)))throw new RuntimeException('Bootstrap archive size or SHA-256 does not match signed manifest');
+ }
+ if($resumeJournal!==null){$expectedBootstrap=$bootstrapReady?$bootstrapManifest['package']['sha256']:null;$expectedRepository=$bootstrapReady?$repositoryManifest['package']['sha256']:null;if(($resumeJournal['core_only']??null)!==$coreOnly||($resumeJournal['bootstrap_package_sha256']??null)!==$expectedBootstrap||($resumeJournal['repository_package_sha256']??null)!==$expectedRepository)throw new RuntimeException('Resume options or signed companion packages differ from the interrupted transaction; rollback it before changing options.');}
+ $html=fetch('https://mybb.com/download/',1048576);$latest=MyBB\Tooling\OfficialMyBBRelease::latestVersion($html);$recordedVersion=$upgradeJournal['release_version']??null;$version=(string)($opts['version']??($resumeJournal['version']??($upgradeJournal!==null?$recordedVersion:$latest)));MyBB\Tooling\OfficialMyBBRelease::versionCode($version);if(!MyBB\Tooling\Compatibility::satisfies($version,'>=1.8.41 <1.9.0'))throw new RuntimeException('Requested official MyBB version is outside the supported v1 range: '.$version);if($resumeJournal!==null&&$version!==($resumeJournal['version']??null))throw new RuntimeException('Resume version must match the recorded interrupted install; rollback it before choosing another version.');if($upgradeJournal!==null&&$version!==($upgradeJournal['release_version']??null))throw new RuntimeException('Upgrade resume version must match its transaction journal.');
+ $downloadHtml=$html;
+ if($version!==$latest){$versions=fetch('https://mybb.com/versions/',2097152);if(!MyBB\Tooling\OfficialMyBBRelease::listedVersion($versions,$version))throw new RuntimeException('Requested version is not listed on official version history');}
+ $versionCode=MyBB\Tooling\OfficialMyBBRelease::versionCode($version);if($command==='upgrade'&&!$upgradeResumeRequested&&version_compare($version,(string)$currentVersion,'<=') )throw new RuntimeException('Upgrade target must be newer than the installed MyBB version');$url=MyBB\Tooling\OfficialMyBBRelease::packageUrl($version);
+ if($version===$latest&&!preg_match('/href="'.preg_quote($url,'/').'"/i',$downloadHtml))throw new RuntimeException('Official download page package link did not match the expected stable release URL');
+ $checksum=null;try{$releasePage=fetch('https://mybb.com/versions/'.$version.'/',1048576);$checksum=MyBB\Tooling\OfficialMyBBRelease::packageSha512($releasePage,$version);}catch(Throwable $e){if(!isset($opts['allow-unverified']))throw $e;}
+ if(!$checksum&&!isset($opts['allow-unverified']))throw new RuntimeException('Official version page did not provide a recognized full-package SHA-512 checksum; refusing installation. --allow-unverified explicitly weakens verification.');
+ if($resumeJournal!==null&&(($resumeJournal['core_sha512']??null)!==$checksum||($resumeJournal['source']??null)!==$url))throw new RuntimeException('Official package verification metadata differs from the interrupted transaction; refusing resume.');if($upgradeJournal!==null&&(($upgradeJournal['release_sha512']??null)!==$checksum||($upgradeJournal['source_url']??null)!==$url))throw new RuntimeException('Official package verification metadata differs from the interrupted upgrade; refusing resume.');
+ $requirements=['PHP '.PHP_VERSION,'curl extension','zip extension and ZipArchive','sodium extension','mysqli extension','at least 100 MB free disk space'];
+ $companions=$command==='upgrade'?['existing companion packages remain unchanged']:($bootstrapReady?['mybb-cli / mybb-toolchain '.$bootstrapManifest['version'],'mybb-plugin-repository / mybbresources-repository '.$repositoryManifest['version']]:['core only (explicit --core-only opt-out)']);
+ $databaseStatus=$setupPreflight['status']??(isset($opts['dry-run'])?'not checked (no protected setup config supplied)':'preflight passed');
+ $preDownload=['MyBB version'=>$version.($version===$latest?' (latest stable)':' (explicit stable version)'),'Target'=>$target,'Operation'=>$command==='upgrade'?'core-file upgrade from '.$currentVersion:'fresh installation','Prerequisites'=>array_map(static fn(string $item):string=>'passed: '.$item,$requirements),'Database setup preflight'=>[(string)$databaseStatus],'Archive verification'=>$checksum?'official full-package SHA-512: '.$checksum:'unverified (explicit --allow-unverified)','Companion components'=>$companions,'Planned target effects'=>$command==='upgrade'?['verified core-file replacements/additions; backup directory '.$backupDirectory,'database changes are deferred to MyBB official web upgrader']:['MyBB core files under target, followed by official installer configuration outputs','Exact archive file and directory map will be shown after checksum verification and before any target write']];
+ writePlan('PRE-DOWNLOAD PLAN',$preDownload);
+ $bootstrapStage=null;$zip=fetch($url,52428800);if($checksum&&!hash_equals($checksum,hash('sha512',$zip)))throw new RuntimeException('Official SHA-512 checksum mismatch');$tmp=tempnam(sys_get_temp_dir(),'mybb-');file_put_contents($tmp,$zip);$stage=sys_get_temp_dir().'/mybb-install-'.bin2hex(random_bytes(8));mkdir($stage,0700);register_shutdown_function(function()use(&$tmp,&$stage,&$bootstrapStage){foreach([$tmp,$stage,$bootstrapStage] as $path){if(!$path||!file_exists($path))continue;if(is_dir($path)){foreach(new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path,FilesystemIterator::SKIP_DOTS),RecursiveIteratorIterator::CHILD_FIRST) as $item){$item->isDir()?@rmdir($item->getPathname()):@unlink($item->getPathname());}@rmdir($path);}else @unlink($path);}});$archive=new ZipArchive();if($archive->open($tmp)!==true)throw new RuntimeException('Downloaded archive is invalid');$total=0;$expanded=0;$seen=[];$entries=[];for($i=0;$i<$archive->numFiles;$i++){$s=$archive->statIndex($i);$name=$s['name'];$dirEntry=str_ends_with($name,'/');$safeName=$dirEntry?substr($name,0,-1):$name;MyBB\Tooling\Manifest::validateRelativePath($safeName);MyBB\Tooling\Manifest::validateArchiveEntryType($archive,$i,$dirEntry);$key=strtolower($safeName);if(isset($seen[$key]))throw new RuntimeException('Official archive contains duplicate normalized paths');$seen[$key]=true;if(!$dirEntry){if(++$total>10000||($expanded+=(int)$s['size'])>200000000)throw new RuntimeException('Official archive exceeds extraction limits');$entries[]=$name;}}if(!$archive->extractTo($stage))throw new RuntimeException('Official archive extraction failed');$archive->close();unlink($tmp);$tmp='';
+ $source=MyBB\Tooling\OfficialMyBBArchive::locateRoot($stage);
+ $planned=[];$planDirectories=[];foreach(new RecursiveIteratorIterator(new RecursiveDirectoryIterator($source,FilesystemIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST) as $item){$relative=str_replace(DIRECTORY_SEPARATOR,'/',substr($item->getPathname(),strlen($source)+1));MyBB\Tooling\Manifest::validateRelativePath($relative);if($item->isDir()){$planDirectories[$relative]=true;continue;}if(!$item->isFile()||$item->isLink())continue;$planned[]=['path'=>$relative,'bytes'=>filesize($item->getPathname())];$parent=dirname($relative);while($parent!=='.'){$planDirectories[$parent]=true;$parent=dirname($parent);}}usort($planned,static fn(array $a,array $b):int=>strcmp($a['path'],$b['path']));
+ if($command==='install'){
+  $packageManifests=$bootstrapReady?['mybb-toolchain'=>$bootstrapManifest,'mybbresources-repository'=>$repositoryManifest]:[];
+  writePlan('VERIFIED WRITE PLAN (no site changes have been made)',MyBB\Installer\InstallPlanOutput::freshInstallSections($planned,array_keys($planDirectories),$packageManifests,$bootstrapReady,$txn));
+ }
+ if($command==='install'&&isset($opts['dry-run']))emit(['status'=>'dry_run','version'=>$version,'target'=>$target,'source'=>$url,'verification'=>$checksum?'official_sha512':'unverified','actions'=>$planned,'database_preflight'=>$setupPreflight??['status'=>'requires_protected_setup_config'],'bootstrap'=>$bootstrapReady?['status'=>'verified','toolchain_version'=>$bootstrapManifest['version'],'repository_version'=>$repositoryManifest['version'],'components'=>['mybb-cli','mybb-plugin-repository']]:['status'=>'not_configured','hint'=>'Build signed assets into mybb-installer-cli/dist or pass --bootstrap-dir']]);
+ if($command==='upgrade'){
+  if($upgradeResumeRequested){$resumePlan=MyBB\Tooling\OfficialMyBBUpgrade::resume($target,$source,(string)$opts['journal'],true);$resumeActions=array_map(static fn(string $path):string=>'resume '.$path,$resumePlan['pending_files']??[]);$backupActions=array_map(static fn(string $path):string=>'backup '.$path,$resumePlan['pending_backups']??[]);writePlan('VERIFIED UPGRADE WRITE PLAN (no site changes have been made)', ['Pending original-file backups'=>$backupActions,'Pending core file actions'=>$resumeActions,'Backup directory'=>[$backupDirectory],'Database migration'=>['not run here; review and use MyBB official web upgrader when required']]);if(isset($opts['dry-run']))emit(['status'=>'dry_run','current_version'=>$currentVersion,'version'=>$version,'target'=>$target,'source'=>$url,'verification'=>$checksum?'official_sha512':'unverified']+$resumePlan);$upgradeResult=MyBB\Tooling\OfficialMyBBUpgrade::resume($target,$source,(string)$opts['journal']);}
+  else{$plan=MyBB\Tooling\OfficialMyBBUpgrade::plan($target,$source);$planDirectories=[];$upgradeActions=[];foreach($plan as $action){$upgradeActions[]=$action['action'].' '.$action['path'].' ('.$action['bytes'].' bytes)';$parent=dirname($action['path']);while($parent!=='.'){$planDirectories[$parent]=true;$parent=dirname($parent);}}$directories=array_keys($planDirectories);sort($directories,SORT_STRING);writePlan('VERIFIED UPGRADE WRITE PLAN (no site changes have been made)', ['Core file actions'=>$upgradeActions,'Directories to create if absent'=>$directories,'Backup directory'=>[$backupDirectory],'Database migration'=>['not run here; review and use MyBB official web upgrader when required']]);if(isset($opts['dry-run']))emit(['status'=>'dry_run','current_version'=>$currentVersion,'version'=>$version,'target'=>$target,'source'=>$url,'verification'=>$checksum?'official_sha512':'unverified','backup_directory'=>$backupDirectory,'actions'=>$plan,'database_upgrade'=>'will_remain_pending_for_official_web_upgrader']);$upgradeResult=MyBB\Tooling\OfficialMyBBUpgrade::apply($target,$source,(string)$backupDirectory,['release_version'=>$version,'release_sha512'=>$checksum,'source_url'=>$url,'previous_mybb_version'=>$currentVersion]);}
+  emit(['status'=>$upgradeResult['status'],'current_version'=>$currentVersion,'version'=>$version,'target'=>$target,'verification'=>$checksum?'official_sha512':'UNVERIFIED','backup_directory'=>$upgradeResult['backup_directory'],'transaction'=>$upgradeResult['journal'],'files'=>$upgradeResult['files'],'replaced'=>$upgradeResult['replaced'],'added'=>$upgradeResult['added'],'database_upgrade'=>$upgradeResult['database_upgrade'],'next'=>'Review the official release notes and run /install/upgrade.php in a browser when required.']);
+ }
+ $bootstrapResult=null;
+ if($bootstrapReady&&str_starts_with((string)$bootstrapZip,'phar://')){$bootstrapStage=sys_get_temp_dir().'/mybb-bootstrap-'.bin2hex(random_bytes(8));$bootstrapZip=MyBB\Installer\InstallTrust::stageEmbeddedPackageArchive((string)$bootstrapZip,$bootstrapStage,'mybb-toolchain.zip',$bootstrapManifest);$repositoryZip=MyBB\Installer\InstallTrust::stageEmbeddedPackageArchive((string)$repositoryZip,$bootstrapStage,'mybbresources-repository.zip',$repositoryManifest);}
+ if(!isset($opts['dry-run'])){
+  if(!is_dir($target)&&!mkdir($target,0755,true))throw new RuntimeException('Could not create target');
+  if($resumeJournal!==null){$journal=$resumeJournal;}
+  else{$journal=['schema_version'=>1,'target'=>$target,'version'=>$version,'source'=>$url,'core_sha512'=>$checksum,'core_only'=>$coreOnly,'bootstrap_package_sha256'=>$bootstrapReady?$bootstrapManifest['package']['sha256']:null,'repository_package_sha256'=>$bootstrapReady?$repositoryManifest['package']['sha256']:null,'status'=>'applying','started_at'=>gmdate(DATE_ATOM),'files'=>[],'directories'=>[],'bootstrap_transactions'=>[]];persistInstallJournal($txn,$journal);}
+  try{
+   foreach(new RecursiveIteratorIterator(new RecursiveDirectoryIterator($source,FilesystemIterator::SKIP_DOTS),RecursiveIteratorIterator::SELF_FIRST) as $item){
+    $rel=str_replace(DIRECTORY_SEPARATOR,'/',substr($item->getPathname(),strlen($source)+1));
+    MyBB\Tooling\Manifest::validateRelativePath($rel);
+    $dest=$target.DIRECTORY_SEPARATOR.str_replace('/',DIRECTORY_SEPARATOR,$rel);
+    if($item->isDir()){
+     ensureInstallDirectories($target,$rel,$journal,$txn);
+     continue;
+    }
+    $expected=hash_file('sha256',$item->getPathname());$index=null;
+    foreach($journal['files'] as $candidate=>$entry)if(strtolower((string)($entry['path']??''))===strtolower($rel)){$index=$candidate;break;}
+    if($index!==null){$entry=$journal['files'][$index];if(($entry['component']??'mybb_core')!=='mybb_core'||!hash_equals((string)($entry['sha256']??''),$expected))throw new RuntimeException('Official core archive does not match the recorded install file: '.$rel);if(is_link($dest))throw new RuntimeException('Refusing a symlinked install destination: '.$rel);if(is_file($dest)){if(!hash_equals($expected,(string)hash_file('sha256',$dest)))throw new RuntimeException('Resume found a locally changed planned file; preserve it and use recovery rollback: '.$rel);if(($entry['status']??'')!=='applied'){$journal['files'][$index]['status']='applied';persistInstallJournal($txn,$journal);}continue;}if(file_exists($dest))throw new RuntimeException('Resume destination is not a regular file: '.$rel);}
+    else{if(file_exists($dest)||is_link($dest))throw new RuntimeException('Unexpected target collision: '.$rel);$index=count($journal['files']);$journal['files'][]=['path'=>$rel,'sha256'=>$expected,'status'=>'planned','component'=>'mybb_core'];persistInstallJournal($txn,$journal);}
+    ensureInstallDirectories($target,dirname($rel),$journal,$txn);
+    if(!is_dir(dirname($dest)))throw new RuntimeException('Could not create target parent: '.$rel);
+    $in=@fopen($item->getPathname(),'rb');$out=@fopen($dest,'xb');
+    if($in===false||$out===false){if(is_resource($in))fclose($in);if(is_resource($out))fclose($out);throw new RuntimeException('Could not safely create target file: '.$rel);}
+    $copiedBytes=stream_copy_to_stream($in,$out);$flushed=fflush($out);fclose($in);fclose($out);
+    if($copiedBytes===false||!$flushed||!hash_equals($expected,(string)hash_file('sha256',$dest)))throw new RuntimeException('Copy verification failed: '.$rel);
+    $journal['files'][$index]['status']='applied';persistInstallJournal($txn,$journal);
+   }
+   $journal['status']='files_ready';persistInstallJournal($txn,$journal);
+   if($bootstrapReady){if($resumeJournal!==null){removeBootstrapWritesForResume($target,$txn,$journal);validateResumeTarget($target,$journal);}$packages=[['zip'=>$bootstrapZip,'manifest'=>$bootstrapManifest],['zip'=>$repositoryZip,'manifest'=>$repositoryManifest]];$stateWriteJournal=journalBootstrapWrites($target,$packages,$txn,$journal);$transactionJournal=static function(string $path)use($target,$txn,&$journal):void{journalBootstrapTransaction($target,$path,$journal,$txn);};$journal['status']='bootstrap_applying';persistInstallJournal($txn,$journal);$pm=new MyBB\Tooling\PackageManager($target,$target.'/inc/plugins/data/mybb-tooling',$bootstrapKeys);$toolchainResult=$pm->installBootstrap($bootstrapZip,$bootstrapManifest,$stateWriteJournal,$transactionJournal);$repositoryResult=$pm->installBootstrap($repositoryZip,$repositoryManifest,$stateWriteJournal,$transactionJournal);$bootstrapResult=['status'=>'installed','packages'=>[$toolchainResult,$repositoryResult]];$journal['bootstrap']=['packages'=>[['slug'=>$bootstrapManifest['slug'],'version'=>$bootstrapManifest['version'],'package_sha256'=>$bootstrapManifest['package']['sha256']],['slug'=>$repositoryManifest['slug'],'version'=>$repositoryManifest['version'],'package_sha256'=>$repositoryManifest['package']['sha256']]]];persistInstallJournal($txn,$journal);}
+   $journal['status']='complete';$journal['completed_at']=gmdate(DATE_ATOM);persistInstallJournal($txn,$journal);
+  }catch(Throwable $e){
+   try{$recovery=rollbackInstallJournal($target,$txn);}catch(Throwable $rollbackError){throw new RuntimeException('Install failed and recovery needs attention; journal: '.$txn.'; recovery error: '.$rollbackError->getMessage(),0,$e);}
+   if(($recovery['status']??'')==='rollback_incomplete')throw new RuntimeException('Install failed; some files were changed or could not be removed. Review recovery journal '.$txn,0,$e);
+   throw new RuntimeException('Install failed; rollback completed. Recovery journal: '.$txn,0,$e);
+  }
+ }
+ $setupResult=null;
+ if($setupConfig!==null){
+  try{$setupResult=MyBB\Installer\InitialSetup::configure($target,$setupConfig);$journal=json_decode((string)file_get_contents($txn),true,512,JSON_THROW_ON_ERROR);$journal['site_setup']=['status'=>'complete','completed_at'=>gmdate(DATE_ATOM)];persistInstallJournal($txn,$journal);}
+  catch(Throwable $setupError){emit(['status'=>'files_installed_setup_failed','version'=>$version,'target'=>$target,'verification'=>$checksum?'official_sha512':'UNVERIFIED','bootstrap'=>$bootstrapReady?($bootstrapResult??['status'=>'installed']):['status'=>'not_configured'],'transaction'=>$txn,'setup'=>['status'=>'failed','message'=>$setupError->getMessage(),'recovery'=>'Review the setup journal and database table prefix before retrying with mybb-install configure.']],1);}
+ }
+ emit(['status'=>$setupResult!==null?'installed_and_configured':'files_installed','version'=>$version,'target'=>$target,'verification'=>$checksum?'official_sha512':'UNVERIFIED','bootstrap'=>$bootstrapReady?($bootstrapResult??['status'=>'verified']):['status'=>'not_configured'],'setup'=>$setupResult??['status'=>'requires_protected_setup_config'],'transaction'=>$txn,'next'=>$setupResult!==null?'The official MyBB installer is locked; review the web server and initial Admin CP login.':'Provide --setup-config=PROTECTED_JSON and run mybb-install configure after core files are installed.']);
+} catch(InvalidArgumentException $e){emit(['error'=>['code'=>'usage','message'=>$e->getMessage(),'retryable'=>false]],2);}catch(Throwable $e){emit(['error'=>['code'=>'install_failed','message'=>$e->getMessage(),'retryable'=>false]],1);}

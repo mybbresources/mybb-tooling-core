@@ -1,0 +1,1 @@
+{"name":"mybbresources/mybb-cli","type":"project","license":"MIT","require":{"php":">=8.2","ext-curl":"*","mybbresources/mybb-tooling":"0.1.0"},"repositories":[{"type":"path","url":"packages/mybb-tooling","options":{"symlink":true,"versions":{"mybbresources/mybb-tooling":"0.1.0"}}}],"bin":["bin/mybb"]}

@@ -1,0 +1,22 @@
+{
+  "database": {
+    "host": "127.0.0.1",
+    "username": "CHANGE_ME",
+    "password": "CHANGE_ME",
+    "name": "CHANGE_ME",
+    "table_prefix": "mybb_",
+    "encoding": "utf8mb4"
+  },
+  "forum": {
+    "url": "https://forum.example.test",
+    "name": "My Forum",
+    "website_name": "My Website",
+    "website_url": "https://example.test",
+    "contact_email": "admin@example.test"
+  },
+  "admin": {
+    "username": "admin",
+    "password": "CHANGE_ME_WITH_A_LONG_RANDOM_PASSWORD",
+    "email": "admin@example.test"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "mybbresources/mybb-tooling",
+  "description": "Shared secure package and catalog contracts for MyBB tooling",
+  "type": "library",
+  "license": "MIT",
+  "require": { "php": ">=8.2", "ext-json": "*", "ext-sodium": "*", "ext-zip": "*" },
+  "autoload": { "psr-4": { "MyBB\\Tooling\\": "src/" } },
+  "scripts": { "test": "php tests/run.php" }
+}
