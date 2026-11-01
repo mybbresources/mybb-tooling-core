@@ -36,6 +36,10 @@ test('signed bootstrap installs one core, separate CLI and repository, with jour
     eq($ledger['mybb-cli']['dependencies'],['mybb-tooling-core'=>'>=0.1.0 <1.0.0']);
     eq($writes[$state.'/installed.json'],hash_file('sha256',$state.'/installed.json'));
     eq(\MyBB\Tooling\CoreRuntime::assertInstalled($root),'0.1.0');
+    // A PHAR/Composer runtime may already be loaded before MyBB includes its core descriptor.
+    require $root.'/inc/plugins/mybb-tooling/autoload.php';
+    require $root.'/inc/plugins/mybb-tooling/autoload.php';
+    eq(\MyBB\Tooling\CoreRuntime::assertInstalled($root),'0.1.0');
     coreBuild([PHP_BINARY,$state.'/bin/mybb','core','status','--path='.$root,'--json']);
     throws(fn()=>$manager->remove('mybb-tooling-core',true,true),'dependents');
     throws(fn()=>\MyBB\Tooling\CoreRuntime::assertInstalled($root,'^0.2'),'incompatible');
