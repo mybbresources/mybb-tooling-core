@@ -33,7 +33,8 @@ if ($bootstrapDirectory !== '' || $trustedKeysFile !== '') {
     $embeddedTrustedKeys = json_decode((string)$trustedBytes, true, 512, JSON_THROW_ON_ERROR);
     if (!is_array($embeddedTrustedKeys) || !$embeddedTrustedKeys) throw new RuntimeException('Installer trusted-key map must contain at least one pinned public key.');
     $trustedBytes = json_encode($embeddedTrustedKeys, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR)."\n";
-    foreach (['bootstrap.json'=>'mybb-toolchain', 'repository.json'=>'mybbresources-repository'] as $manifestName=>$expectedSlug) {
+    $bootstrapManifests=[];
+    foreach (['core.json'=>'mybb-tooling-core','bootstrap.json'=>'mybb-cli','repository.json'=>'mybbresources-repository'] as $manifestName=>$expectedSlug) {
         $archiveName = preg_replace('/\.json$/', '.zip', $manifestName);
         $manifestPath = $bootstrapDirectory.'/'.$manifestName;
         $archivePath = $bootstrapDirectory.'/'.$archiveName;
@@ -42,6 +43,7 @@ if ($bootstrapDirectory !== '' || $trustedKeysFile !== '') {
         }
         $manifest = MyBB\Tooling\Manifest::decode((string)file_get_contents($manifestPath));
         MyBB\Tooling\Manifest::verifySignature($manifest, $embeddedTrustedKeys);
+        $bootstrapManifests[pathinfo($manifestName,PATHINFO_FILENAME)]=$manifest;
         if ($manifest['slug'] !== $expectedSlug || $manifest['version'] !== $version) throw new RuntimeException('Bootstrap manifest identity or version does not match the PHAR release.');
         if (filesize($archivePath) !== $manifest['package']['size'] || !hash_equals($manifest['package']['sha256'], hash_file('sha256', $archivePath))) {
             throw new RuntimeException('Bootstrap archive size or SHA-256 does not match its signed manifest.');
@@ -68,6 +70,7 @@ if ($bootstrapDirectory !== '' || $trustedKeysFile !== '') {
         $bootstrapAssets['mybb-installer-cli/dist/'.$manifestName] = $manifestPath;
         $bootstrapAssets['mybb-installer-cli/dist/'.$archiveName] = $archivePath;
     }
+    MyBB\Tooling\BootstrapSet::validate($bootstrapManifests);
     $bundleKeysPath = $bootstrapDirectory.'/trusted-keys.json';
     if (is_link($bundleKeysPath) || !is_file($bundleKeysPath)) throw new RuntimeException('Signed installer bootstrap directory is missing trusted-keys.json.');
     $bundleKeys = json_decode((string)file_get_contents($bundleKeysPath), true, 512, JSON_THROW_ON_ERROR);
