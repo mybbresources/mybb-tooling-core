@@ -1,0 +1,131 @@
+{
+  "manifest": {
+    "schema_version": 2,
+    "slug": "mybb-tooling-core",
+    "name": "MyBB Tooling Core",
+    "description": "Shared runtime and trusted key ring for MyBB tooling.",
+    "authors": [
+      "MyBB Resources"
+    ],
+    "license": "MIT",
+    "source": {
+      "type": "original"
+    },
+    "requirements": {
+      "mybb": ">=1.8.41 <1.9.0",
+      "php": ">=8.2",
+      "packages": []
+    },
+    "uninstall": {
+      "remove_owned_files": true,
+      "preserve_user_data": true
+    }
+  },
+  "files": [
+    {
+      "source": "core-plugin/inc/plugins/mybb_tooling_core.php",
+      "destination": "inc/plugins/mybb_tooling_core.php",
+      "role": "plugin"
+    },
+    {
+      "source": "autoload.php",
+      "destination": "inc/plugins/mybb-tooling/autoload.php",
+      "role": "other"
+    },
+    {
+      "source": "src/BootstrapSet.php",
+      "destination": "inc/plugins/mybb-tooling/src/BootstrapSet.php",
+      "role": "other"
+    },
+    {
+      "source": "src/CatalogClient.php",
+      "destination": "inc/plugins/mybb-tooling/src/CatalogClient.php",
+      "role": "other"
+    },
+    {
+      "source": "src/CatalogException.php",
+      "destination": "inc/plugins/mybb-tooling/src/CatalogException.php",
+      "role": "other"
+    },
+    {
+      "source": "src/CatalogPagination.php",
+      "destination": "inc/plugins/mybb-tooling/src/CatalogPagination.php",
+      "role": "other"
+    },
+    {
+      "source": "src/Compatibility.php",
+      "destination": "inc/plugins/mybb-tooling/src/Compatibility.php",
+      "role": "other"
+    },
+    {
+      "source": "src/CoreMigrationRecovery.php",
+      "destination": "inc/plugins/mybb-tooling/src/CoreMigrationRecovery.php",
+      "role": "other"
+    },
+    {
+      "source": "src/CoreRuntime.php",
+      "destination": "inc/plugins/mybb-tooling/src/CoreRuntime.php",
+      "role": "other"
+    },
+    {
+      "source": "src/DatabaseTools.php",
+      "destination": "inc/plugins/mybb-tooling/src/DatabaseTools.php",
+      "role": "other"
+    },
+    {
+      "source": "src/Manifest.php",
+      "destination": "inc/plugins/mybb-tooling/src/Manifest.php",
+      "role": "other"
+    },
+    {
+      "source": "src/OfficialMyBBArchive.php",
+      "destination": "inc/plugins/mybb-tooling/src/OfficialMyBBArchive.php",
+      "role": "other"
+    },
+    {
+      "source": "src/OfficialMyBBRelease.php",
+      "destination": "inc/plugins/mybb-tooling/src/OfficialMyBBRelease.php",
+      "role": "other"
+    },
+    {
+      "source": "src/OfficialMyBBUpgrade.php",
+      "destination": "inc/plugins/mybb-tooling/src/OfficialMyBBUpgrade.php",
+      "role": "other"
+    },
+    {
+      "source": "src/PackageManager.php",
+      "destination": "inc/plugins/mybb-tooling/src/PackageManager.php",
+      "role": "other"
+    },
+    {
+      "source": "src/PluginInventory.php",
+      "destination": "inc/plugins/mybb-tooling/src/PluginInventory.php",
+      "role": "other"
+    },
+    {
+      "source": "src/PluginLifecycle.php",
+      "destination": "inc/plugins/mybb-tooling/src/PluginLifecycle.php",
+      "role": "other"
+    },
+    {
+      "source": "src/RepositoryMetadataCache.php",
+      "destination": "inc/plugins/mybb-tooling/src/RepositoryMetadataCache.php",
+      "role": "other"
+    },
+    {
+      "source": "src/TextTable.php",
+      "destination": "inc/plugins/mybb-tooling/src/TextTable.php",
+      "role": "other"
+    },
+    {
+      "source": "mybb-plugin-repository/config/trusted-keys.json",
+      "destination": "inc/plugins/mybb-tooling/config/trusted-keys.json",
+      "role": "other"
+    },
+    {
+      "generate": "core-version",
+      "destination": "inc/plugins/mybb-tooling/version.json",
+      "role": "other"
+    }
+  ]
+}

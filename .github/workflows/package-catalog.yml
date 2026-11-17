@@ -1,0 +1,19 @@
+name: Package for MyBB Resources
+run-name: Package for MyBB Resources (${{ inputs.version }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version for the selected source ref
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    uses: mybbresources/actions/.github/workflows/package-mybb-plugin.yml@ad415fe7e2dd864a2e0869862153e27e0f7e5ec4
+    with:
+      version: ${{ inputs.version }}
