@@ -38,8 +38,11 @@ final class CatalogClient
         return $this->json($this->origin . '/api/v1/plugins/' . rawurlencode($slug) . '/releases/' . rawurlencode($version));
     }
 
-    public function download(array $manifest): string
+    public function download(array $manifest, #[\SensitiveParameter] ?string $token = null): string
     {
+        if ($token !== null && !preg_match('/\A[0-9a-f]{64}\z/', $token)) {
+            throw new \InvalidArgumentException('Invalid catalog download token.');
+        }
         $url = $manifest['package']['url'] ?? null;
         $expectedSize = $manifest['package']['size'] ?? null;
         if (!is_string($url) || !str_starts_with($url, $this->origin . '/api/v1/')) {
@@ -67,6 +70,7 @@ final class CatalogClient
         $limitExceeded = false;
         curl_setopt_array($ch, [
             CURLOPT_FILE => $fp,
+            CURLOPT_HTTPHEADER => $token === null ? [] : ['Authorization: Bearer '.$token],
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_CONNECTTIMEOUT => 8,
             CURLOPT_TIMEOUT => 90,
