@@ -13,3 +13,5 @@ PHP 8.2–8.4 is supported on Ubuntu 24.04 x86_64 and macOS 15 Intel/Apple Silic
 Run `php tests/run.php`, `php tests/phar-smoke.php`, and `php tests/phar-bootstrap-smoke.php` for the public checks. `php tools/install-component-dependencies.php` installs local Composer dependencies directly from canonical source without copying tracked library snapshots. Generated keys, site data, and release artifacts must stay outside tracked source.
 
 See each component README for commands and [RELEASING.md](RELEASING.md) for artifact verification. PHAR releases must include verified signed companion bundles; a fresh install skips those only with explicit `--core-only`. Package copying never implicitly activates plugins, and uninstall preserves user data and locally changed files by default.
+
+[![advertisement](https://ads.servead.net/i/191d3faf-0dbd-4dc3-9efc-f571107d4b3e.svg)](https://ads.servead.net/c/191d3faf-0dbd-4dc3-9efc-f571107d4b3e)
